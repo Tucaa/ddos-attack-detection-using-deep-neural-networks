@@ -1,5 +1,6 @@
 import random
 import math
+import csv
 
 
 def rand_uniform(min_val: float, max_val: float) -> float:
@@ -14,3 +15,20 @@ def rand_normal(mean: float, std: float) -> float:
 
 def clamp(x: float, low: float, high: float) -> float:
     return max(low, min(high, x))
+
+def write_csv(dataset: list[dict], filename: str) -> None:
+    if not dataset:
+        print("Dataset is empty, nothing to write.")
+        return
+
+    if not filename.endswith(".csv"):
+        filename += ".csv"
+
+    fieldnames = list(dataset[0].keys())
+
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(dataset)
+
+    print(f"Written {len(dataset)} rows to '{filename}'.")

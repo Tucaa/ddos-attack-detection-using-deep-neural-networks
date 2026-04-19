@@ -8,8 +8,7 @@ def udp_large_packets() -> dict:
     unique_src = rand_uniform(500, 3000)
 
     return {
-        "label": "udp-flood-large",
-
+        "label": "udp_flood_large",
         # Volumetrija
         "packet_rate": clamp(packet_rate, 40000, 150000),
         "byte_rate": clamp(byte_rate, 50000000, 200000000),
@@ -49,8 +48,7 @@ def dns_amplification() -> dict:
     unique_src = rand_uniform(2000, 10000)
 
     return {
-        "label": "dns-amplification",
-
+        "label": "dns_amplification",
         # Volumetrija (veliki paketi zbog DNS responsa)
         "packet_rate": clamp(packet_rate, 30000, 120000),
         "byte_rate": packet_rate * rand_uniform(800, 1200),
@@ -90,7 +88,7 @@ def subnet_carpet_bombing() -> dict:
     unique_dst = rand_uniform(5000, 20000)
 
     return {
-        "label": "subnet-carpet-bombing",
+        "label": "subnet_carpet_bombing",
         # Volumetrija
         "packet_rate": clamp(packet_rate, 35000, 140000),
         "byte_rate": packet_rate * rand_uniform(100, 400),
@@ -130,7 +128,7 @@ def syn_flood() -> dict:
     unique_src = rand_uniform(3000, 15000)
 
     return {
-        "label": "syn-flood",
+        "label": "syn_flood",
         # Volumetrija (manji paketi - samo SYN)
         "packet_rate": clamp(packet_rate, 50000, 180000),
         "byte_rate": packet_rate * rand_uniform(60, 100),
@@ -170,8 +168,7 @@ def icmp_flood() -> dict:
     unique_src = rand_uniform(2000, 12000)
 
     return {
-        "label": "icmp-flood",
-
+        "label": "icmp_flood",
         # Volumetrija (mali paketi ICMP echo request)
         "packet_rate": clamp(packet_rate, 60000, 200000),
         "byte_rate": packet_rate * rand_uniform(70, 120),
@@ -211,7 +208,7 @@ def udp_flood_mixed() -> dict:
     unique_src = rand_uniform(1500, 8000)
 
     return {
-        "label": "udp-flood-mixed",
+        "label": "udp_flood_mixed",
         # Volumetrija (srednje veličine paketi)
         "packet_rate": clamp(packet_rate, 45000, 160000),
         "byte_rate": packet_rate * rand_uniform(200, 600),
@@ -251,7 +248,7 @@ def ntp_amplification() -> dict:
     unique_src = rand_uniform(1500, 7000)
 
     return {
-        "label": "ntp-amplification",
+        "label": "ntp_amplification",
         # Volumetrija (veliki response paketi)
         "packet_rate": clamp(packet_rate, 30000, 110000),
         "byte_rate": packet_rate * rand_uniform(400, 700),
@@ -291,7 +288,7 @@ def ack_flood() -> dict:
     unique_src = rand_uniform(4000, 18000)
 
     return {
-        "label": "ack-flood",
+        "label": "ack_flood",
         # Volumetrija
         "packet_rate": clamp(packet_rate, 50000, 190000),
         "byte_rate": packet_rate * rand_uniform(50, 90),
@@ -328,12 +325,12 @@ def ack_flood() -> dict:
 # F-ja za generisanje podataka
 # Izmesaj i ovde podatke
 ATTACK_GENERATORS = {
-    "udp-flood-large": udp_large_packets,
-    "dns-amplification": dns_amplification,
-    "subnet-carpet-bombing": subnet_carpet_bombing,
-    "syn-flood": syn_flood,
-    "icmp-flood": icmp_flood,
-    "udp-flood-mixed": udp_flood_mixed,
-    "ntp-amplification": ntp_amplification,
-    "ack-flood": ack_flood,
+    "udp_flood_large": udp_large_packets,
+    "dns_amplification": dns_amplification,
+    "subnet_carpet_bombing": subnet_carpet_bombing,
+    "syn_flood": syn_flood,
+    "icmp_flood": icmp_flood,
+    "udp_flood_mixed": udp_flood_mixed,
+    "ntp_amplification": ntp_amplification,
+    "ack_flood": ack_flood,
 }
