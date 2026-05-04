@@ -242,7 +242,8 @@ def evaluate_full(model, loader, criterion, device, label_names: list[str]):
 
         # Matthews Correlation Coefficient
         # Dobra metrika za neuravnotežene klase, -1 najgore, +1 najbolje
-        mcc = matthews_corrcoef(all_targets, all_preds, len(label_names))
+        mcc = matthews_corrcoef(all_targets, all_preds)
+        # mcc = matthews_corrcoef(all_targets, all_preds, len(label_names))
         print(f"Matthews Correlation Coefficient (MCC): {mcc:.4f}\n")
 
         # ROC-AUC (one-vs-rest)
@@ -403,6 +404,7 @@ def train(csv_path: str, save_path: str = "ddos_lstm.pt"):
 if __name__ == "__main__":
     path = input('Insert csf file path: ').strip()
     train(path)
+    # loaded = torch.load('ddos_lstm.pt')
     # data = prepare_data(path)
     # dataloaders = make_dataloaders(path)
     # print(data)
