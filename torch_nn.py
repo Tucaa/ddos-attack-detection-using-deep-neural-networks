@@ -98,20 +98,30 @@ def make_dataloaders(csv_path: str, seq_len: int = SEQUENCE_LEN, batch_size: int
     try:
         sequences, labels, scaler, le, feature_cols = prepare_data(csv_path, seq_len)
 
-        X_train, X_val, y_train, y_val = train_test_split(
-            sequences, labels, test_size=0.2, random_state=42, stratify=labels
-        )
+        n = len(sequences)
+        train_end = int(n * 0.60)
+        val_end   = int(n * 0.80)  # 60% + 20%
+
+        X_train, y_train = sequences[:train_end],       labels[:train_end]
+        X_val,   y_val   = sequences[train_end:val_end], labels[train_end:val_end]
+        X_test,  y_test  = sequences[val_end:],          labels[val_end:]
+
+        print(f"Train:      {len(X_train):>7} samples")
+        print(f"Validation: {len(X_val):>7} samples")
+        print(f"Test:       {len(X_test):>7} samples")
 
         train_ds = DDoSDataset(X_train, y_train)
         val_ds   = DDoSDataset(X_val,   y_val)
+        test_ds  = DDoSDataset(X_test,  y_test)
 
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
         val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False)
+        test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False)
 
-        return train_loader, val_loader, scaler, le, len(feature_cols)
-    
+        return train_loader, val_loader, test_loader, scaler, le, len(feature_cols)
+
     except Exception as e:
-        print(f'Exception torch_nn | make_data: {e} Line: {sys.exc_info()[2].tb_lineno}')
+        print(f'Exception torch_nn | make_dataloaders: {e} Line: {sys.exc_info()[2].tb_lineno}')
 
 
 class DDoSLSTM(nn.Module):
@@ -340,11 +350,10 @@ def plot_roc_curves(y_bin, all_probs, label_names: list[str]):
 # Glavna funkcija za trening modela
 def train(csv_path: str, save_path: str = "ddos_lstm.pt"):
     try:
-        # Kasnije doradi ovaj deo , videces da li ces preko dokera ili drugacisje
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Using : {device}")
+        print(f"Using: {device}")
 
-        train_loader, val_loader, scaler, le, num_features = make_dataloaders(csv_path)
+        train_loader, val_loader, test_loader, scaler, le, num_features = make_dataloaders(csv_path)
         num_classes = len(le.classes_)
 
         model = DDoSLSTM(
@@ -363,7 +372,6 @@ def train(csv_path: str, save_path: str = "ddos_lstm.pt"):
 
         for epoch in range(1, EPOCHS + 1):
             train_loss, train_acc = singular_epoch(model, train_loader, optimizer, criterion, device)
-            # val_loss,   val_acc   = evaluate(model, val_loader, criterion, device, LABELS)
             val_loss,   val_acc   = evaluate(model, val_loader, criterion, device)
             scheduler.step(val_loss)
 
@@ -373,12 +381,11 @@ def train(csv_path: str, save_path: str = "ddos_lstm.pt"):
                 f"Val loss: {val_loss:.4f}  acc: {val_acc:.3f}"
             )
 
-            # Čuvamo samo najbolji model
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 torch.save({
-                    "model_state": model.state_dict(),
-                    "scaler":      scaler,
+                    "model_state":   model.state_dict(),
+                    "scaler":        scaler,
                     "label_encoder": le,
                     "num_features":  num_features,
                     "hyperparams": {
@@ -388,13 +395,19 @@ def train(csv_path: str, save_path: str = "ddos_lstm.pt"):
                         "seq_len":     SEQUENCE_LEN,
                     },
                 }, save_path)
-                print(f"Saved new model at the path: {save_path}")
+                print(f"Saved new model: {save_path}")
 
-        print("Finished training")
-
-        print("\n____ Final evaluation____\n")
+        # Finalna evaluacija
+        # Kasnije uradi kros validaciju
+        print("\n __Evaluation on validation set__")
         evaluate_full(model, val_loader, criterion, device, LABELS)
-    
+
+        # Test set koristimo samo jednom, na samom kraju 
+        print("\n __Final evauluation on test dataset__")
+        evaluate_full(model, test_loader, criterion, device, LABELS)
+
+        print("\n Finished training!")
+
     except Exception as e:
         print(f'Exception torch_nn | train: {e} Line: {sys.exc_info()[2].tb_lineno}')
 
