@@ -16,6 +16,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import sys
+from functions import *
 
 
 SEQUENCE_LEN = 50
@@ -248,7 +249,7 @@ def evaluate_full(model, loader, criterion, device, label_names: list[str]):
 
         # Classification report 
         print("\nClassification Report:")
-        print(classification_report(all_targets, all_preds, target_names=label_names, digits=4))
+        print(classification_report(all_targets, all_preds, labels=list(range(len(label_names))), target_names=label_names, digits=4))
 
         # Matthews Correlation Coefficient
         # Dobra metrika za neuravnotežene klase, -1 najgore, +1 najbolje
@@ -346,9 +347,40 @@ def plot_roc_curves(y_bin, all_probs, label_names: list[str]):
     except Exception as e:
         print(f'Exception torch_nn | plot_roc_curves: {e} Line: {sys.exc_info()[2].tb_lineno}')
 
+# Nova implementacija sa oversamplingom
+def train(csv_path: str, save_path: str = "ddos_lstm.pt"):
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using: {device}")
+
+        # Učitavamo raw dataset za računanje weighta pre nego što pravimo sekvence
+        raw_dataset = pd.read_csv(csv_path).to_dict("records")
+        class_weights = get_class_weights_tensor(raw_dataset, LABELS, device)
+        print(f"\nClass weights tensor: {class_weights}")
+
+        train_loader, val_loader, test_loader, scaler, le, num_features = make_dataloaders(csv_path)
+        num_classes = len(le.classes_)
+
+        model = DDoSLSTM(
+            input_size=num_features,
+            hidden_size=HIDDEN_SIZE,
+            num_layers=NUM_LAYERS,
+            num_classes=num_classes,
+            dropout=DROPOUT,
+        ).to(device)
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, factor=0.5)
+        # Class weights direktno u loss funkciju
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+        # ... ostatak train funkcije ostaje isti
+
+    except Exception as e:
+        print(f'Exception torch_nn | train: {e} Line: {sys.exc_info()[2].tb_lineno}')
 
 # Glavna funkcija za trening modela
-def train(csv_path: str, save_path: str = "ddos_lstm.pt"):
+def train_old(csv_path: str, save_path: str = "ddos_lstm.pt"):
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using: {device}")
