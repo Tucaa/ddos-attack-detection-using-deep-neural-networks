@@ -371,10 +371,47 @@ def train(csv_path: str, save_path: str = "ddos_lstm.pt"):
 
         optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, factor=0.5)
-        # Class weights direktno u loss funkciju
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        criterion = nn.CrossEntropyLoss()
 
-        # ... ostatak train funkcije ostaje isti
+        best_val_loss = float("inf")
+
+        for epoch in range(1, EPOCHS + 1):
+            train_loss, train_acc = singular_epoch(model, train_loader, optimizer, criterion, device)
+            val_loss,   val_acc   = evaluate(model, val_loader, criterion, device)
+            scheduler.step(val_loss)
+
+            print(
+                f"Epoch {epoch:>3}/{EPOCHS} | "
+                f"Train loss: {train_loss:.4f}  acc: {train_acc:.3f} | "
+                f"Val loss: {val_loss:.4f}  acc: {val_acc:.3f}"
+            )
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                torch.save({
+                    "model_state":   model.state_dict(),
+                    "scaler":        scaler,
+                    "label_encoder": le,
+                    "num_features":  num_features,
+                    "hyperparams": {
+                        "hidden_size": HIDDEN_SIZE,
+                        "num_layers":  NUM_LAYERS,
+                        "dropout":     DROPOUT,
+                        "seq_len":     SEQUENCE_LEN,
+                    },
+                }, save_path)
+                print(f"Saved new model: {save_path}")
+
+        # Finalna evaluacija
+        # Kasnije uradi kros validaciju
+        print("\n __Evaluation on validation set__")
+        evaluate_full(model, val_loader, criterion, device, LABELS)
+
+        # Test set koristimo samo jednom, na samom kraju 
+        print("\n __Final evauluation on test dataset__")
+        evaluate_full(model, test_loader, criterion, device, LABELS)
+
+        print("\n Finished training!")
 
     except Exception as e:
         print(f'Exception torch_nn | train: {e} Line: {sys.exc_info()[2].tb_lineno}')

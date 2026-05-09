@@ -4,10 +4,9 @@ from windowing import *
 from functions import *
 from functions import write_csv
 import random
-import numpy as np
 import time
-from collections import defaultdict
-import torch
+import sys
+
 
 
 
@@ -32,7 +31,7 @@ ALL_ATTACK_CONFIGS = [
     ("syn_flood",             syn_flood),
     ("dns_amplification",     dns_amplification),
     ("subnet_carpet_bombing", subnet_carpet_bombing),
-    ("udp_flood_large",       udp_large_packets),
+    ("udp_flood_large",       udp_flood_large),
     ("icmp_flood",            icmp_flood),
     ("udp_flood_mixed",       udp_flood_mixed),
     ("ntp_amplification",     ntp_amplification),
@@ -77,7 +76,7 @@ def generate_mixed_dataset(window_ms: int, days: int) -> list[dict]:
 
             timeline_attacks = generate_timeline(window_ms, *timeline_specs)
 
-            print('TIMELINE NAPADI', timeline_attacks)
+            # print('TIMELINE NAPADI', timeline_attacks)
 
             # Dodaje se šum na timeline uzorke
             timeline_attacks = [
@@ -218,7 +217,7 @@ def generate_mixed_dataset_old(window_ms: int, days: int) -> list[dict]:
 
         # Normal -> napad i napad -> normal za svaku klasu
         attack_configs = [
-            ("udp_flood_large",   udp_large_packets),
+            ("udp_flood_large",   udp_flood_large),
             ("icmp_flood",        icmp_flood),
             ("udp_flood_mixed",   udp_flood_mixed),
             ("ntp_amplification", ntp_amplification),

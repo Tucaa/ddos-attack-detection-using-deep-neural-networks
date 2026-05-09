@@ -2,7 +2,7 @@ from functions import rand_uniform, rand_normal, clamp
 
 
 # Abnormalna velicina UDP paketa
-def udp_large_packets() -> dict:
+def udp_flood_large() -> dict:
     packet_rate = rand_normal(80000, 15000)
     byte_rate = packet_rate * rand_normal(1300, 100)
     unique_src = rand_uniform(500, 3000)
@@ -325,7 +325,7 @@ def ack_flood() -> dict:
 # F-ja za generisanje podataka
 # Izmesaj i ovde podatke
 ATTACK_GENERATORS = {
-    "udp_flood_large": udp_large_packets,
+    "udp_flood_large": udp_flood_large,
     "dns_amplification": dns_amplification,
     "subnet_carpet_bombing": subnet_carpet_bombing,
     "syn_flood": syn_flood,

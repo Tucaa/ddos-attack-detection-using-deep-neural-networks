@@ -3,6 +3,8 @@ import math
 import csv
 import torch
 import sys
+import numpy as np
+
 # from windowing import *
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -137,7 +139,7 @@ def oversample_minority_classes(dataset: list[dict], labels: list[str], target_r
         normal_count = len(by_label.get("normal", []))
         target_count = int(normal_count * target_ratio)
 
-        print(f"\nOversampling — target po klasi: {target_count} (normal: {normal_count})")
+        print(f"\nOversampling — target by class: {target_count} (normal: {normal_count})")
 
         oversampled = list(dataset)
 
@@ -149,11 +151,11 @@ def oversample_minority_classes(dataset: list[dict], labels: list[str], target_r
             current_count = len(current)
 
             if current_count >= target_count:
-                print(f"  {label:<25} {current_count:>7} — preskočeno")
+                print(f"  {label:<25} {current_count:>7} skipping this")
                 continue
 
             needed = target_count - current_count
-            print(f"  {label:<25} {current_count:>7} → dodajem {needed} uzoraka")
+            print(f"  {label:<25} {current_count:>7} > adding {needed} sample")
 
             for i in range(needed):
                 # Uzimamo nasumičan postojeći uzorak i dodajemo šum

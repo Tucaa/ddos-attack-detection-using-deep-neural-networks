@@ -1,5 +1,5 @@
-# from datetime import datetime, timezone
-# from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import random
 import time
 from functions import rand_uniform, rand_normal, clamp
@@ -10,7 +10,7 @@ import sys
 # Karakteristike napada u sekundama
 # Napomena - prob parametar je u procentima
 ATTACK_PATTERN_DURATION = {
-    "udp_large_packets": {
+    "udp_flood_large": {
         "min_duration": 120,
         "max_duration": 1800,
         "typical_duration": 600,
@@ -76,6 +76,30 @@ ATTACK_PATTERN_DURATION = {
     },
 }
 
+
+# Kasnije sredi funkcije po fajlovima
+def format_timestamp(ms: int) -> str:
+    try:
+        # Konvertuje milisekunde u formatirani string
+        dt = datetime.fromtimestamp(ms / 1000)
+        dt_final = dt.replace(tzinfo = ZoneInfo('UTC'))
+        # Eventualno dodaj 2 funkcije Prvu koja konvertuje string u datetimeobj(UTC) obrnuto formatira dt. obj u string(u lokalnom vremenus)
+        return dt_final.strftime("%Y-%m-%dT%H:%M:%S")
+    
+    except Exception as e:
+        print(f'Exception windowing | format_timestamp: {e} Line: {sys.exc_info()[2].tb_lineno}')
+
+
+
+# F-je koje dodaju vremenske serije podacima
+def add_window_metadata(sample: dict, window_id: int, timestamp: int, active_atk: int) -> dict:
+    return {
+        **sample,
+        "window_id": window_id,
+        "timestamp": timestamp,
+        "ts_formated": format_timestamp(timestamp),
+        "attack_active": int(active_atk),
+    }
 
 def define_duration(attack_type: str) -> int:
     try:
