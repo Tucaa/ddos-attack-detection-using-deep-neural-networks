@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader, Subset
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.model_selection import train_test_split
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import (
     confusion_matrix,
     classification_report,
@@ -19,13 +21,15 @@ import sys
 from functions import *
 
 
-SEQUENCE_LEN = 50
-BATCH_SIZE = 50
-HIDDEN_SIZE = 100
-NUM_LAYERS = 2
-DROPOUT = 0.3 
+SEQUENCE_LEN  = 50
+BATCH_SIZE    = 64
+HIDDEN_SIZE   = 128
+NUM_LAYERS    = 2
+DROPOUT       = 0.3
 LEARNING_RATE = 1e-3
-EPOCHS = 20
+EPOCHS        = 20
+N_SPLITS      = 5   # Broj foldova za TimeSeriesSplit
+
 
 
 EXCLUDED_COLS = ['label', 'window_id', 'timestamp', 'ts_formated', 'attack_active', 'instance_id', 'vector_id']
@@ -54,6 +58,32 @@ class DDoSDataset(Dataset):
     
     def __getitem__(self, idx):
         return self.X[idx], self.Y[idx]
+    
+
+# Attenttion mehanizam
+class AttentionLayer(nn.Module):
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        # Nauceni vektor paznje koji ocenjuje svaki timestep
+        self.attention = nn.Linear(hidden_size, 1, bias=False)
+
+    def forward(self, lstm_out: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        lstm_out: (batch, seq_len, hidden_size)
+        Vraca:
+            context:  (batch, hidden_size) — tezinski zbir svih timestepova
+            weights:  (batch, seq_len)     — tezine paznje po timestepu
+        """
+        # Skorovi paznje za svaki timestep
+        scores  = self.attention(lstm_out).squeeze(-1)        # (batch, seq_len)
+        weights = F.softmax(scores, dim=1)                    # (batch, seq_len)
+
+        # Tezinski zbir hidden stateova
+        context = torch.bmm(
+            weights.unsqueeze(1), lstm_out                    # (batch, 1, seq_len) x (batch, seq_len, hidden)
+        ).squeeze(1)                                          # (batch, hidden_size)
+
+        return context, weights
     
 
 def prepare_data(csv_path: str, seq_len: int = SEQUENCE_LEN):
@@ -95,6 +125,45 @@ def prepare_data(csv_path: str, seq_len: int = SEQUENCE_LEN):
 
 
 
+def prepare_data(csv_path: str, seq_len: int = SEQUENCE_LEN):
+    """
+    Ucitava CSV, sortira po timestamp-u, skalira featuere i pravi sekvence.
+    Vraca sekvence, labele, scaler, label encoder i listu feature kolona.
+    """
+    try:
+        df = pd.read_csv(csv_path)
+
+        if "timestamp" in df.columns:
+            df = df.sort_values("timestamp").reset_index(drop=True)
+
+        feature_cols = [c for c in df.columns if c not in EXCLUDED_COLS]
+        X_raw = df[feature_cols].values.astype(np.float32)
+
+        label_enc = LabelEncoder()
+        label_enc.classes_ = np.array(LABELS)
+        Y_raw = label_enc.transform(df["label"].values)
+
+        scaler  = StandardScaler()
+        X_scaled = scaler.fit_transform(X_raw)
+
+        sequences, labels = [], []
+        for i in range(len(X_scaled) - seq_len):
+            sequences.append(X_scaled[i: i + seq_len])
+            labels.append(Y_raw[i + seq_len - 1])
+
+        return (
+            np.array(sequences),
+            np.array(labels),
+            scaler,
+            label_enc,
+            feature_cols,
+        )
+
+    except Exception as e:
+        print(f"Exception | prepare_data: {e} Line: {sys.exc_info()[2].tb_lineno}")
+
+
+
 def make_dataloaders(csv_path: str, seq_len: int = SEQUENCE_LEN, batch_size: int = BATCH_SIZE):
     try:
         sequences, labels, scaler, le, feature_cols = prepare_data(csv_path, seq_len)
@@ -124,7 +193,7 @@ def make_dataloaders(csv_path: str, seq_len: int = SEQUENCE_LEN, batch_size: int
     except Exception as e:
         print(f'Exception torch_nn | make_dataloaders: {e} Line: {sys.exc_info()[2].tb_lineno}')
 
-
+# Obican LSTM model
 class DDoSLSTM(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, num_layers: int,num_classes: int, dropout: float):
         super().__init__()
@@ -153,6 +222,53 @@ class DDoSLSTM(nn.Module):
             return self.classifier(last_hidden)
         except Exception as e:
                 print(f'Exception torch_nn | DDosLSTM.forward: {e} Line: {sys.exc_info()[2].tb_lineno}')
+
+
+# LSTM model sa atention mehanizmom
+class DDoSLSTMAttention(nn.Module):
+    def __init__(
+        self,
+        input_size:  int,
+        hidden_size: int,
+        num_layers:  int,
+        num_classes: int,
+        dropout:     float,
+    ):
+        super().__init__()
+
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+        )
+
+        self.attention = AttentionLayer(hidden_size)
+
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_size // 2, num_classes),
+        )
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        x: (batch, seq_len, input_size)
+        Vraca logits i attention weights (korisno za vizualizaciju).
+        """
+        try:
+            lstm_out, _ = self.lstm(x)                  # (batch, seq_len, hidden)
+            context, weights = self.attention(lstm_out) # (batch, hidden), (batch, seq_len)
+            logits = self.classifier(context)           # (batch, num_classes)
+            return logits, weights
+
+        except Exception as e:
+            print(f"Exception | DDoSLSTMAttention.forward: {e} "
+                  f"Line: {sys.exc_info()[2].tb_lineno}")
 
 
 def singular_epoch(model, loader, optimizer, criterion, device):
@@ -416,47 +532,145 @@ def train(csv_path: str, save_path: str = "ddos_lstm.pt"):
     except Exception as e:
         print(f'Exception torch_nn | train: {e} Line: {sys.exc_info()[2].tb_lineno}')
 
-# Glavna funkcija za trening modela
-def train_old(csv_path: str, save_path: str = "ddos_lstm.pt"):
+# Trening jednog folda (sa kros validacijom)
+def train_fold(model, train_loader, val_loader,criterion, optimizer, scheduler,device, fold: int,) -> dict:
+    """
+    Trenira model za jedan fold i vraca metriku najboljeg epocha.
+    """
+    best_val_loss = float("inf")
+    best_metrics  = {}
+
+    for epoch in range(1, EPOCHS + 1):
+        # Trening
+        model.train()
+        train_loss, train_correct = 0.0, 0
+
+        for X_batch, y_batch in train_loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            optimizer.zero_grad()
+
+            logits, _ = model(X_batch)
+            loss = criterion(logits, y_batch)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            train_loss    += loss.item() * len(y_batch)
+            train_correct += (logits.argmax(dim=1) == y_batch).sum().item()
+
+        # Validacija
+        model.eval()
+        val_loss, val_correct = 0.0, 0
+        all_preds, all_targets = [], []
+
+        with torch.no_grad():
+            for X_batch, y_batch in val_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                logits, _ = model(X_batch)
+                loss = criterion(logits, y_batch)
+
+                val_loss    += loss.item() * len(y_batch)
+                val_correct += (logits.argmax(dim=1) == y_batch).sum().item()
+                all_preds.extend(logits.argmax(dim=1).cpu().numpy())
+                all_targets.extend(y_batch.cpu().numpy())
+
+        n_train = len(train_loader.dataset)
+        n_val   = len(val_loader.dataset)
+        t_loss  = train_loss / n_train
+        t_acc   = train_correct / n_train
+        v_loss  = val_loss / n_val
+        v_acc   = val_correct / n_val
+
+        scheduler.step(v_loss)
+
+        print(
+            f"  Fold {fold} | Epoch {epoch:>2}/{EPOCHS} | "
+            f"Train loss: {t_loss:.4f}  acc: {t_acc:.3f} | "
+            f"Val loss: {v_loss:.4f}  acc: {v_acc:.3f}"
+        )
+
+        if v_loss < best_val_loss:
+            best_val_loss = v_loss
+            best_metrics  = {
+                "fold":      fold,
+                "val_loss":  v_loss,
+                "val_acc":   v_acc,
+                "mcc":       matthews_corrcoef(all_targets, all_preds),
+                "preds":     all_preds,
+                "targets":   all_targets,
+            }
+
+    return best_metrics
+
+
+def cross_validate(csv_path: str, save_path: str = "ddos_lstm_attention.pt"):
+    """
+    TimeSeriesSplit cross-validacija sa LSTM + Attention modelom.
+    Svaki fold cuva hronoloski redosled - nema data leakage-a.
+    Na kraju ispisuje prosecnu metriku kroz sve foldove.
+    """
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using: {device}")
 
-        train_loader, val_loader, test_loader, scaler, le, num_features = make_dataloaders(csv_path)
-        num_classes = len(le.classes_)
+        sequences, labels, scaler, le, feature_cols = prepare_data(csv_path)
+        num_features = len(feature_cols)
+        num_classes  = len(le.classes_)
 
-        model = DDoSLSTM(
-            input_size=num_features,
-            hidden_size=HIDDEN_SIZE,
-            num_layers=NUM_LAYERS,
-            num_classes=num_classes,
-            dropout=DROPOUT,
-        ).to(device)
+        dataset = DDoSDataset(sequences, labels)
+        tss     = TimeSeriesSplit(n_splits=N_SPLITS)
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, factor=0.5)
-        criterion = nn.CrossEntropyLoss()
+        fold_metrics = []
+        best_overall_loss = float("inf")
+        best_model_state  = None
 
-        best_val_loss = float("inf")
+        for fold, (train_idx, val_idx) in enumerate(tss.split(sequences), start=1):
+            print(f"\n{'='*60}")
+            print(f"  Fold {fold}/{N_SPLITS} | "
+                  f"Train: {len(train_idx):,}  Val: {len(val_idx):,}")
+            print(f"{'='*60}")
 
-        for epoch in range(1, EPOCHS + 1):
-            train_loss, train_acc = singular_epoch(model, train_loader, optimizer, criterion, device)
-            val_loss,   val_acc   = evaluate(model, val_loader, criterion, device)
-            scheduler.step(val_loss)
-
-            print(
-                f"Epoch {epoch:>3}/{EPOCHS} | "
-                f"Train loss: {train_loss:.4f}  acc: {train_acc:.3f} | "
-                f"Val loss: {val_loss:.4f}  acc: {val_acc:.3f}"
+            train_loader = DataLoader(
+                Subset(dataset, train_idx),
+                batch_size=BATCH_SIZE, shuffle=False,  # shuffle=False cuva temporalni redosled
+            )
+            val_loader = DataLoader(
+                Subset(dataset, val_idx),
+                batch_size=BATCH_SIZE, shuffle=False,
             )
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            # Novi model za svaki fold
+            model = DDoSLSTMAttention(
+                input_size=num_features,
+                hidden_size=HIDDEN_SIZE,
+                num_layers=NUM_LAYERS,
+                num_classes=num_classes,
+                dropout=DROPOUT,
+            ).to(device)
+
+            optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, patience=3, factor=0.5
+            )
+            criterion = nn.CrossEntropyLoss()
+
+            metrics = train_fold(
+                model, train_loader, val_loader,
+                criterion, optimizer, scheduler,
+                device, fold,
+            )
+            fold_metrics.append(metrics)
+
+            # Cuvamo globalno najbolji model
+            if metrics["val_loss"] < best_overall_loss:
+                best_overall_loss = metrics["val_loss"]
+                best_model_state  = model.state_dict()
                 torch.save({
-                    "model_state":   model.state_dict(),
+                    "model_state":   best_model_state,
                     "scaler":        scaler,
                     "label_encoder": le,
                     "num_features":  num_features,
+                    "architecture":  "LSTM+Attention",
                     "hyperparams": {
                         "hidden_size": HIDDEN_SIZE,
                         "num_layers":  NUM_LAYERS,
@@ -464,28 +678,120 @@ def train_old(csv_path: str, save_path: str = "ddos_lstm.pt"):
                         "seq_len":     SEQUENCE_LEN,
                     },
                 }, save_path)
-                print(f"Saved new model: {save_path}")
+                print(f"  New best model saved (fold {fold}) -> {save_path}")
 
-        # Finalna evaluacija
-        # Kasnije uradi kros validaciju
-        print("\n __Evaluation on validation set__")
-        evaluate_full(model, val_loader, criterion, device, LABELS)
+        # Sumarni rezultati
+        print(f"\n{'='*60}")
+        print("  Cross-validation summary")
+        print(f"{'='*60}")
+        print(f"  {'Fold':<8} {'Val Loss':<12} {'Val Acc':<12} {'MCC'}")
+        print(f"  {'-'*48}")
 
-        # Test set koristimo samo jednom, na samom kraju 
-        print("\n __Final evauluation on test dataset__")
-        evaluate_full(model, test_loader, criterion, device, LABELS)
+        for m in fold_metrics:
+            print(f"  {m['fold']:<8} {m['val_loss']:<12.4f} "
+                  f"{m['val_acc']:<12.4f} {m['mcc']:.4f}")
 
-        print("\n Finished training!")
+        avg_loss = np.mean([m["val_loss"] for m in fold_metrics])
+        avg_acc  = np.mean([m["val_acc"]  for m in fold_metrics])
+        avg_mcc  = np.mean([m["mcc"]      for m in fold_metrics])
+        std_acc  = np.std( [m["val_acc"]  for m in fold_metrics])
+
+        print(f"  {'-'*48}")
+        print(f"  {'Avg':<8} {avg_loss:<12.4f} {avg_acc:<12.4f} {avg_mcc:.4f}")
+        print(f"  {'Std':<8} {'':12} {std_acc:<12.4f}")
+        print(f"{'='*60}\n")
+
+        # Classification report najboljeg folda
+        best_fold = min(fold_metrics, key=lambda m: m["val_loss"])
+        print(f"Classification report (best fold {best_fold['fold']}):")
+        print(classification_report(
+            best_fold["targets"], best_fold["preds"],
+            labels=list(range(num_classes)),
+            target_names=LABELS,
+            digits=4,
+            zero_division=0,
+        ))
+
+        print("Training finished!")
+        return fold_metrics
 
     except Exception as e:
-        print(f'Exception torch_nn | train: {e} Line: {sys.exc_info()[2].tb_lineno}')
+        print(f"Exception | cross_validate: {e} Line: {sys.exc_info()[2].tb_lineno}")
+
+# Glavna funkcija za trening modela , stara implementacija!
+# def train_old(csv_path: str, save_path: str = "ddos_lstm.pt"):
+#     try:
+#         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#         print(f"Using: {device}")
+
+#         train_loader, val_loader, test_loader, scaler, le, num_features = make_dataloaders(csv_path)
+#         num_classes = len(le.classes_)
+
+#         model = DDoSLSTM(
+#             input_size=num_features,
+#             hidden_size=HIDDEN_SIZE,
+#             num_layers=NUM_LAYERS,
+#             num_classes=num_classes,
+#             dropout=DROPOUT,
+#         ).to(device)
+
+#         optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+#         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, factor=0.5)
+#         criterion = nn.CrossEntropyLoss()
+
+#         best_val_loss = float("inf")
+
+#         for epoch in range(1, EPOCHS + 1):
+#             train_loss, train_acc = singular_epoch(model, train_loader, optimizer, criterion, device)
+#             val_loss,   val_acc   = evaluate(model, val_loader, criterion, device)
+#             scheduler.step(val_loss)
+
+#             print(
+#                 f"Epoch {epoch:>3}/{EPOCHS} | "
+#                 f"Train loss: {train_loss:.4f}  acc: {train_acc:.3f} | "
+#                 f"Val loss: {val_loss:.4f}  acc: {val_acc:.3f}"
+#             )
+
+#             if val_loss < best_val_loss:
+#                 best_val_loss = val_loss
+#                 torch.save({
+#                     "model_state":   model.state_dict(),
+#                     "scaler":        scaler,
+#                     "label_encoder": le,
+#                     "num_features":  num_features,
+#                     "hyperparams": {
+#                         "hidden_size": HIDDEN_SIZE,
+#                         "num_layers":  NUM_LAYERS,
+#                         "dropout":     DROPOUT,
+#                         "seq_len":     SEQUENCE_LEN,
+#                     },
+#                 }, save_path)
+#                 print(f"Saved new model: {save_path}")
+
+#         # Finalna evaluacija
+#         # Kasnije uradi kros validaciju
+#         print("\n __Evaluation on validation set__")
+#         evaluate_full(model, val_loader, criterion, device, LABELS)
+
+#         # Test set koristimo samo jednom, na samom kraju 
+#         print("\n __Final evauluation on test dataset__")
+#         evaluate_full(model, test_loader, criterion, device, LABELS)
+
+#         print("\n Finished training!")
+
+#     except Exception as e:
+#         print(f'Exception torch_nn | train: {e} Line: {sys.exc_info()[2].tb_lineno}')
 
 
 
 
 if __name__ == "__main__":
+    # Kasnije ovde razradi input, da postoji vise razlicitih modela koji
+    # Se mogu trenirati pa u zavisnosti od userovog inputa trenirati razlicite modele
     path = input('Insert csf file path: ').strip()
-    train(path)
+    # train(path)
+    cross_validate(path)
+
     # loaded = torch.load('ddos_lstm.pt')
     # data = prepare_data(path)
     # dataloaders = make_dataloaders(path)

@@ -60,6 +60,8 @@ def generate_mixed_dataset(window_ms: int, days: int) -> list[dict]:
         while curr_ts < end_ts:
 
             # Nasumičan redosled klasa za svaku iteraciju!! (po potrebi promeniti)
+            # Ovo ces trebati da promenis kod attention modela!!!!!!!!!!!!!
+            # Namesti 2 verzije da imas i za oversamplovanje i za attention model!!
             shuffled_attacks = ALL_ATTACK_CONFIGS.copy()
             random.shuffle(shuffled_attacks)
 
@@ -93,6 +95,8 @@ def generate_mixed_dataset(window_ms: int, days: int) -> list[dict]:
 
             # Balansirani uzorci sa tranzicijama
             # Nasumičan redosled i ovde (isti shuffled_attacks)
+            # Ovo ces trebati da promenis kod attention modela!!!!!!!!!!!!!
+            # Namesti 2 verzije da imas i za oversamplovanje i za attention model!!
             balanced_samples = []
             for class_idx, (attack_type, attack_fn) in enumerate(shuffled_attacks):
                 offset = class_idx * (SAMPLES_PER_CLASS + TRANSITION_WINDOWS * 2)

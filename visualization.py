@@ -211,6 +211,79 @@ def _metric_label(metric: str) -> str:
     }
     return labels.get(metric, metric)
 
+def plot_byte_timeline(
+    df: pd.DataFrame,
+    resample: str = "5min",
+    save_path: str = None,
+):
+    """
+    Grafik ukupnog byte_rate kroz vreme sa obojanim pozadinama po klasi.
+    X osa: vreme
+    Y osa: byte rate (B/s)
+    Svaki napadni period je obojen bojom odgovarajuce klase.
+    """
+    fig, ax = plt.subplots(figsize=(20, 6))
+
+    # Agregacija byte_rate po vremenskom intervalu
+    df_resampled = (
+        df.set_index("ts_formated")
+        .groupby(pd.Grouper(freq=resample))["byte_rate"]
+        .mean()
+        .reset_index()
+    )
+
+    # Osnovna linija ukupnog saobracaja
+    ax.plot(
+        df_resampled["ts_formated"],
+        df_resampled["byte_rate"],
+        color="#2c3e50",
+        linewidth=0.9,
+        alpha=0.85,
+        zorder=3,
+        label="Total byte rate",
+    )
+
+    # Obojena pozadina po klasi za svaki vremenski prozor
+    df_sorted = df.sort_values("ts_formated")
+    prev_ts   = None
+    prev_lbl  = None
+
+    for _, row in df_sorted.iterrows():
+        curr_ts  = row["ts_formated"]
+        curr_lbl = row["label"]
+
+        if prev_ts is not None and prev_lbl is not None:
+            color = CLASS_COLORS.get(prev_lbl, "#999999")
+            alpha = 0.10 if prev_lbl == "normal" else 0.25
+            ax.axvspan(prev_ts, curr_ts, color=color, alpha=alpha, linewidth=0)
+
+        prev_ts  = curr_ts
+        prev_lbl = curr_lbl
+
+    # Legenda 
+    handles = [
+        mpatches.Patch(color=CLASS_COLORS.get(lbl, "#999999"), label=lbl, alpha=0.6)
+        for lbl in sorted(df["label"].unique())
+    ]
+    handles.insert(0, plt.Line2D([0], [0], color="#2c3e50", linewidth=1.5, label="Byte rate"))
+
+    ax.set_title("Byte rate kroz vreme po tipu saobracaja", fontsize=14, pad=14)
+    ax.set_xlabel("Time", fontsize=11)
+    ax.set_ylabel("Byte rate (B/s)", fontsize=11)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+    plt.xticks(rotation=35)
+    ax.legend(handles=handles, loc="upper left", fontsize=8,
+              framealpha=0.9, ncol=2)
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"Saved -> {save_path}")
+    plt.show()
+
 
 # Sumarna funkcija za vizualizaciju
 
@@ -221,7 +294,7 @@ def visualize_dataset(csv_path: str, resample: str = "5min"):
     print(f"Loading dataset: {csv_path}")
     df = load_dataset(csv_path)
     print(f"Total samples: {len(df):,}  |  Classes: {sorted(df['label'].unique())}\n")
-
+    plot_byte_timeline(df,       save_path="byte_timeline.png",      resample=resample)
     plot_class_distribution(df,  save_path="dist_klasa.png")
     plot_traffic_timeline(df,    save_path="timeline_byte_rate.png", resample=resample)
     plot_multi_metric(df,        save_path="multi_metrika.png",      resample=resample)
