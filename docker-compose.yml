@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+
+  llama-engine:
+    image: ollama/ollama:latest
+    container_name: llama-engine
+
+    ports:
+      - "11434:11434"
+
+    volumes:
+      - ollama_data:/root/.ollama
+
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    restart: unless-stopped
+
+    networks:
+      - internal-net
+
+  api-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: fast-api-app
+
+    depends_on:
+      - llama-engine
+
+    ports:
+      - "8000:8000"
+
+    environment:
+      - OLLAMA_HOST=http://llama-engine:11434
+      - CUDA_VISIBLE_DEVICES=0
+
+    volumes:
+      - .:/app
+
+    working_dir: /app
+
+    command: >
+      uvicorn api.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    restart: unless-stopped
+
+    networks:
+      - internal-net
+
+volumes:
+  ollama_data:
+
+networks:
+  internal-net:
+    driver: bridge

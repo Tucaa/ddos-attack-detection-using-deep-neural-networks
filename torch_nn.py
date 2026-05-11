@@ -712,6 +712,9 @@ def cross_validate(csv_path: str, save_path: str = "ddos_lstm_attention.pt"):
             zero_division=0,
         ))
 
+        # Ovde treba da se doda kompletna metrtika confusion matrica f1metrika, roc krive ..... 
+        # NEOMOJ DA ZABORAVIS !!!!!!!!!!!!!!!!!!!!!!!!!!!
+
         print("Training finished!")
         return fold_metrics
 
