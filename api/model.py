@@ -1,43 +1,43 @@
 # Ucitavanje modela i inference logika
-# Odvojeno od API sloja radi cistog koda i lakseg testiranja
 
-import torch
-import torch.nn as nn
-import numpy as np
 import logging
 from typing import Optional
-from api.config import (
-    MODEL_PATH,
-    NUM_FEATURES,
-    NUM_CLASSES,
-    LSTM_HIDDEN_SIZE,
-    LSTM_NUM_LAYERS,
-    LSTM_DROPOUT,
-    CLASS_LABELS,
-    WINDOW_SIZE,
-)
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+
+from api.config import MODEL_PATH, CLASS_LABELS
 
 logger = logging.getLogger(__name__)
 
+# Kolone koje se iskljucuju pri citanju CSV-a (iste kao pri treniranju)
+EXCLUDED_COLS = {
+    "label", "window_id", "timestamp", "ts_formated",
+    "attack_active", "instance_id", "vector_id",
+}
 
-# --- Definicija LSTM arhitekture ---
-# Mora biti identicna onoj koriscenog pri treniranju
 
-class LSTMClassifier(nn.Module):
-    """
-    Dvoslojna LSTM mreza za klasifikaciju DDoS saobracaja.
-    Ulaz: (batch, seq_len, num_features)
-    Izlaz: (batch, num_classes) — logiti
-    """
+# --- Arhitektura modela (mora biti identicna treniranoj) ---
 
-    def __init__(
-        self,
-        input_size: int,
-        hidden_size: int,
-        num_layers: int,
-        num_classes: int,
-        dropout: float,
-    ):
+class AttentionLayer(nn.Module):
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.attention = nn.Linear(hidden_size, 1, bias=False)
+
+    def forward(self, lstm_out: torch.Tensor):
+        # lstm_out: (batch, seq_len, hidden_size)
+        scores  = self.attention(lstm_out).squeeze(-1)       # (batch, seq_len)
+        weights = F.softmax(scores, dim=1)                   # (batch, seq_len)
+        context = torch.bmm(weights.unsqueeze(1), lstm_out).squeeze(1)  # (batch, hidden)
+        return context, weights
+
+
+class DDoSLSTMAttention(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, num_classes, dropout):
         super().__init__()
         self.lstm = nn.LSTM(
             input_size=input_size,
@@ -46,52 +46,69 @@ class LSTMClassifier(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0.0,
         )
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size, num_classes)
+        self.attention = AttentionLayer(hidden_size)
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_size // 2, num_classes),
+        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor):
         # x: (batch, seq_len, input_size)
-        lstm_out, _ = self.lstm(x)
-        # Uzimamo samo poslednji vremenski korak
-        last_hidden = lstm_out[:, -1, :]
-        out = self.dropout(last_hidden)
-        return self.fc(out)
+        lstm_out, _      = self.lstm(x)
+        context, weights = self.attention(lstm_out)
+        return self.classifier(context), weights
 
 
-# --- Singleton wrapper za model ---
+# --- Singleton wrapper ---
 
 class ModelWrapper:
     """
-    Singleton koji drzi ucitani model i obavlja inference.
-    Ucitava se jednom pri pokretanju aplikacije.
+    Singleton koji drzi ucitan model, scaler i label encoder.
+    Sve sto je potrebno za inference ucitava se iz checkpointa.
     """
 
     def __init__(self):
-        self.model: Optional[LSTMClassifier] = None
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model:         Optional[DDoSLSTMAttention] = None
+        self.scaler         = None
+        self.label_encoder  = None
+        self.seq_len:   int = 50
+        self.device         = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def load(self, path: str = MODEL_PATH) -> bool:
         """
-        Ucitava tezine modela sa diska.
-        Vraca True ako je uspesno, False ako nije.
+        Ucitava checkpoint sa diska.
+        Ocekuje format koji cuva cross_validate():
+            model_state, scaler, label_encoder, num_features, hyperparams
         """
         try:
-            self.model = LSTMClassifier(
-                input_size=NUM_FEATURES,
-                hidden_size=LSTM_HIDDEN_SIZE,
-                num_layers=LSTM_NUM_LAYERS,
-                num_classes=NUM_CLASSES,
-                dropout=LSTM_DROPOUT,
+            checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+
+            hp           = checkpoint["hyperparams"]
+            num_features = checkpoint["num_features"]
+            num_classes  = len(checkpoint["label_encoder"].classes_)
+
+            self.model = DDoSLSTMAttention(
+                input_size=num_features,
+                hidden_size=hp["hidden_size"],
+                num_layers=hp["num_layers"],
+                num_classes=num_classes,
+                dropout=hp["dropout"],
             )
-            # Ucitavamo samo state_dict, ne ceo model objekat
-            state = torch.load(path, map_location=self.device, weights_only=True)
-            self.model.load_state_dict(state)
+            self.model.load_state_dict(checkpoint["model_state"])
             self.model.to(self.device)
             self.model.eval()
+
+            self.scaler        = checkpoint["scaler"]
+            self.label_encoder = checkpoint["label_encoder"]
+            self.seq_len       = hp["seq_len"]
+
             logger.info(f"Model loaded from '{path}' on {self.device}.")
             return True
+
         except FileNotFoundError:
-            logger.warning(f"Model file '{path}' not found. Running without model.")
+            logger.warning(f"Model file '{path}' not found.")
             return False
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
@@ -101,41 +118,79 @@ class ModelWrapper:
     def is_loaded(self) -> bool:
         return self.model is not None
 
-    def predict(self, window: list[list[float]]) -> dict:
+    def _windows_from_df(self, df: pd.DataFrame) -> np.ndarray:
         """
-        Prima window kao listu lista float vrednosti.
-        window shape: (WINDOW_SIZE, NUM_FEATURES)
-        Vraca recnik sa predicted_class, confidence, is_attack, probabilities.
+        Uzima DataFrame, iskljucuje ne-feature kolone, skalira sa sacuvanim
+        scalerom i pravi sliding window sekvence.
+        Vraca ndarray oblika (num_windows, seq_len, num_features).
         """
-        if not self.is_loaded:
-            raise RuntimeError("Model is not loaded.")
+        feature_cols = [c for c in df.columns if c not in EXCLUDED_COLS]
+        X_raw    = df[feature_cols].values.astype(np.float32)
+        X_scaled = self.scaler.transform(X_raw)
 
-        # Konvertujemo u tensor: (1, WINDOW_SIZE, NUM_FEATURES)
-        arr = np.array(window, dtype=np.float32)
-        tensor = torch.from_numpy(arr).unsqueeze(0).to(self.device)
+        n = len(X_scaled)
+        if n < self.seq_len:
+            raise ValueError(
+                f"CSV ima {n} redova, potrebno je najmanje {self.seq_len}."
+            )
 
-        with torch.no_grad():
-            logits = self.model(tensor)                    # (1, num_classes)
-            probs = torch.softmax(logits, dim=-1)          # (1, num_classes)
-            probs_np = probs.squeeze(0).cpu().numpy()      # (num_classes,)
+        return np.stack([
+            X_scaled[i: i + self.seq_len]
+            for i in range(n - self.seq_len + 1)
+        ])
 
-        predicted_idx = int(np.argmax(probs_np))
+    @torch.no_grad()
+    def predict_single(self, window: list[list[float]]) -> dict:
+        """
+        Predikcija za jedan prozor — koristi /predict JSON endpoint.
+        Ocekuje window oblika (seq_len, num_features).
+        """
+        tensor = torch.from_numpy(
+            np.array(window, dtype=np.float32)
+        ).unsqueeze(0).to(self.device)
+
+        logits, _ = self.model(tensor)
+        probs     = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
+
+        predicted_idx   = int(np.argmax(probs))
         predicted_label = CLASS_LABELS[predicted_idx]
-        confidence = float(probs_np[predicted_idx])
-
-        # Sortiramo verovatnoce opadajuce za response
-        sorted_indices = np.argsort(probs_np)[::-1]
-        probabilities = [
-            {"label": CLASS_LABELS[i], "probability": float(probs_np[i])}
-            for i in sorted_indices
-        ]
 
         return {
-            "predicted_class": predicted_label,
-            "confidence": confidence,
-            "is_attack": predicted_label != "normal",
-            "probabilities": probabilities,
+            "predicted_class":    predicted_label,
+            "confidence":         float(probs[predicted_idx]),
+            "is_attack":          predicted_label != "normal",
+            "class_probabilities": {
+                CLASS_LABELS[i]: float(probs[i]) for i in range(len(CLASS_LABELS))
+            },
         }
+
+    @torch.no_grad()
+    def predict_from_df(self, df: pd.DataFrame, batch_size: int = 256) -> list[dict]:
+        """
+        Batch predikcija iz DataFrame-a — koristi /predict/file endpoint.
+        Interno pravi sliding windows i prolazi kroz model u batchevima.
+        """
+        windows = self._windows_from_df(df)
+        loader  = DataLoader(
+            TensorDataset(torch.from_numpy(windows).to(self.device)),
+            batch_size=batch_size,
+            shuffle=False,
+        )
+
+        results = []
+        for (batch,) in loader:
+            logits, _ = self.model(batch)
+            probs_arr = torch.softmax(logits, dim=-1).cpu().numpy()
+            for probs in probs_arr:
+                idx   = int(np.argmax(probs))
+                label = CLASS_LABELS[idx]
+                results.append({
+                    "predicted_class": label,
+                    "confidence":      float(probs[idx]),
+                    "is_attack":       label != "normal",
+                })
+
+        return results
 
 
 # Globalna instanca — deli se kroz celu aplikaciju

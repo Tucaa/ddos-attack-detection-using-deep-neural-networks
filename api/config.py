@@ -7,15 +7,15 @@ MODEL_PATH = os.getenv("MODEL_PATH", "ddos_lstm_attention.pt")
 # MODEL_PATH = os.getenv("MODEL_PATH", "ddos_lstm.pt")
 
 CLASS_LABELS = [
-    "normal",
-    "udp-flood-large",
-    "dns-amplification",
-    "subnet-carpet-bombing",
-    "syn-flood",
-    "icmp-flood",
-    "udp-flood-mixed",
-    "ntp-amplification",
-    "ack-flood",
+   'normal',
+    'udp_flood_large',
+    'dns_amplification', 
+    'subnet_carpet_bombing', 
+    'syn_flood',
+    'icmp_flood', 
+    'udp_flood_mixed',
+    'ntp_amplification',
+    'ack_flood'
 ]
 
 NUM_CLASSES = len(CLASS_LABELS)

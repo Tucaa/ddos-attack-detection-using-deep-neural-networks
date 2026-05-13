@@ -1,18 +1,19 @@
+import io
 import logging
+import pandas as pd
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+
 from api.config import WINDOW_SIZE, NUM_FEATURES, FEATURE_NAMES, CLASS_LABELS
 from api.model import model_wrapper
 from api.ollama_client import generate_attack_scenario, generate_attack_analysis
 from api.schemas import (
-    PredictRequest,
-    PredictResponse,
+    PredictRequest, PredictResponse,
+    FileInferenceResponse, WindowPrediction,
     HealthResponse,
-    TrafficSample,
-    SimulateRequest,
-    SimulateResponse,
-    AttackAnalysis,
+    SimulateRequest, SimulateResponse, AttackAnalysis,
 )
 
 logging.basicConfig(
@@ -22,15 +23,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 VALID_ATTACK_TYPES = {
-    "udp-flood-large",
-    "dns-amplification",
-    "subnet-carpet-bombing",
-    "syn-flood",
-    "icmp-flood",
-    "udp-flood-mixed",
-    "ntp-amplification",
-    "ack-flood",
-    "normal",
+    "udp-flood-large", "dns-amplification", "subnet-carpet-bombing",
+    "syn-flood", "icmp-flood", "udp-flood-mixed",
+    "ntp-amplification", "ack-flood", "normal",
 }
 
 
@@ -41,9 +36,7 @@ async def lifespan(app: FastAPI):
     if model_wrapper.is_loaded:
         logger.info("Model ready.")
     else:
-        logger.warning(
-            "Model NOT loaded — /predict will return 503 until model is available."
-        )
+        logger.warning("Model NOT loaded — /predict endpoints will return 503.")
     yield
     logger.info("Shutting down.")
 
@@ -51,11 +44,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="DDoS Detection Inference API",
     description=(
-        "Inference API for PyTorch LSTM model for DDoS attack classification. "
-        f"Takes a sliding window of {WINDOW_SIZE} samples, "
-        f"each with {NUM_FEATURES} features."
+        "Inference API za PyTorch LSTM+Attention model. "
+        f"Sliding window: {WINDOW_SIZE} uzoraka x {NUM_FEATURES} feature-a."
     ),
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -67,15 +59,11 @@ app.add_middleware(
 )
 
 
-# Meta endpointi
+# --- Meta ---
 
 @app.get("/", tags=["Meta"])
 async def root():
-    return {
-        "message": "DDoS Detection API is running.",
-        "docs": "/docs",
-        "health": "/health",
-    }
+    return {"message": "DDoS Detection API is running.", "docs": "/docs"}
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Meta"])
@@ -89,59 +77,88 @@ async def health():
     )
 
 
-# Inference endpointi
-# Vidi da kasnije uradis neku validaciju inputa
+# --- Inference ---
+
 @app.post("/predict", response_model=PredictResponse, tags=["Inference"])
 async def predict(request: PredictRequest):
-    """
-    Direktna LSTM predikcija za manualno uneti sliding window.
-    """
+    """Predikcija za jedan rucno konstruisan sliding window (JSON)."""
     if not model_wrapper.is_loaded:
-        raise HTTPException(
-            status_code=503,
-            detail="Model is not loaded. Check server logs.",
-        )
-
-    window_data = [sample.features for sample in request.window]
+        raise HTTPException(status_code=503, detail="Model is not loaded.")
 
     try:
-        result = model_wrapper.predict(window_data)
+        result = model_wrapper.predict_single(
+            [sample.features for sample in request.window]
+        )
     except Exception as e:
         logger.error(f"Inference error: {e}")
-        raise HTTPException(status_code=500, detail=f"Inference failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
 
     logger.info(
         f"Prediction: {result['predicted_class']} "
         f"(confidence={result['confidence']:.3f}, attack={result['is_attack']})"
     )
-
     return PredictResponse(**result)
 
+
+@app.post("/predict/file", response_model=FileInferenceResponse, tags=["Inference"])
+async def predict_file(file: UploadFile = File(...)):
+    """
+    Batch predikcija iz CSV fajla.
+    CSV mora imati iste feature kolone kao trening podaci, bez kolone 'label'.
+    """
+    if not model_wrapper.is_loaded:
+        raise HTTPException(status_code=503, detail="Model is not loaded.")
+
+    try:
+        content = await file.read()
+        df = pd.read_csv(io.BytesIO(content))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read CSV: {e}")
+
+    try:
+        results = model_wrapper.predict_from_df(df)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"File inference error: {e}")
+        raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
+
+    predictions  = [WindowPrediction(window_index=i, **r) for i, r in enumerate(results)]
+    attack_count = sum(1 for r in results if r["is_attack"])
+
+    logger.info(
+        f"File inference: {len(results)} windows, "
+        f"{attack_count} attacks ({file.filename})"
+    )
+
+    return FileInferenceResponse(
+        total_windows=len(results),
+        attack_windows=attack_count,
+        predictions=predictions,
+    )
+
+
+# --- Simulate (Ollama) ---
 
 @app.post("/simulate", response_model=SimulateResponse, tags=["Inference"])
 async def simulate(request: SimulateRequest):
     """
-    Kompletan pipeline: Ollama generise scenario napada →
-    LSTM klasifikuje → Ollama analizira i generise mitigaciju.
-
-    - **attack_type**: tip napada koji treba simulirati
+    Kompletan pipeline: Ollama generise scenario → LSTM klasifikuje →
+    Ollama analizira i generise mitigaciju.
     """
     if not model_wrapper.is_loaded:
-        raise HTTPException(
-            status_code=503,
-            detail="Model is not loaded. Check server logs.",
-        )
+        raise HTTPException(status_code=503, detail="Model is not loaded.")
 
     if request.attack_type not in VALID_ATTACK_TYPES:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Unknown type of attack: '{request.attack_type}'. "
-                f"Valid types: {sorted(VALID_ATTACK_TYPES)}"
+                f"Nepoznat tip napada: '{request.attack_type}'. "
+                f"Validni tipovi: {sorted(VALID_ATTACK_TYPES)}"
             ),
         )
 
-    # Korak 1: Ollama generise matricu saobracaja 
+    # Korak 1: Ollama generise matricu saobracaja
     logger.info(f"[simulate] Generating scenario for: {request.attack_type}")
     try:
         matrix = await generate_attack_scenario(
@@ -150,27 +167,24 @@ async def simulate(request: SimulateRequest):
             feature_names=FEATURE_NAMES,
         )
     except (ValueError, RuntimeError) as e:
-        logger.error(f"[simulate] Error during scenario generation: {e}")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Ollama failed to generate the scenario: {str(e)}",
-        )
+        logger.error(f"[simulate] Scenario generation error: {e}")
+        raise HTTPException(status_code=502, detail=f"Ollama scenario error: {e}")
 
     # Korak 2: LSTM klasifikacija
-    logger.info(f"[simulate] Starting LSTM inference...")
+    logger.info("[simulate] Running LSTM inference...")
     try:
-        prediction = model_wrapper.predict(matrix)
+        prediction = model_wrapper.predict_single(matrix)
     except Exception as e:
         logger.error(f"[simulate] Inference error: {e}")
-        raise HTTPException(status_code=500, detail=f"Inference failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
 
     logger.info(
-        f"[simulate] Predikcija: {prediction['predicted_class']} "
+        f"[simulate] Prediction: {prediction['predicted_class']} "
         f"(confidence={prediction['confidence']:.3f})"
     )
 
-    # Korak 3: Ollama analiza 
-    logger.info(f"[simulate] Generating analysis and mitigation...")
+    # Korak 3: Ollama analiza
+    logger.info("[simulate] Generating analysis...")
     try:
         analysis_data = await generate_attack_analysis(
             predicted_class=prediction["predicted_class"],
@@ -180,10 +194,9 @@ async def simulate(request: SimulateRequest):
             attack_type_requested=request.attack_type,
         )
     except Exception as e:
-        logger.error(f"[simulate] Error during analysis: {e}")
-        # Analiza nije kriticna — ne prekidamo ako ne uspe
+        logger.error(f"[simulate] Analysis error: {e}")
         analysis_data = {
-            "description": "Analysis not available at the moment.",
+            "description": "Analysis not available.",
             "mitigation_steps": [],
         }
 

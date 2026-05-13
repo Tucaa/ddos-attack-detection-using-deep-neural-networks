@@ -47,10 +47,10 @@ def objective_fast(trial: optuna.Trial,precomputed: dict, num_features: int, num
 
         # Jedan temporalni split umesto K-fold
         split     = int(len(sequences) * 0.8)
-        X_train   = torch.tensor(sequences[:split], dtype=torch.float32)
-        y_train   = torch.tensor(labels[:split],    dtype=torch.long)
-        X_val     = torch.tensor(sequences[split:], dtype=torch.float32)
-        y_val     = torch.tensor(labels[split:],    dtype=torch.long)
+        # X_train   = torch.tensor(sequences[:split], dtype=torch.float32)
+        # y_train   = torch.tensor(labels[:split],    dtype=torch.long)
+        # X_val     = torch.tensor(sequences[split:], dtype=torch.float32)
+        # y_val     = torch.tensor(labels[split:],    dtype=torch.long)
 
         train_loader = DataLoader(
             DDoSDataset(sequences[:split], labels[:split]),
