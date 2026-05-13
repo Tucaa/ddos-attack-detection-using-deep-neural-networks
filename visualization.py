@@ -310,10 +310,10 @@ def visualize_dataset(csv_path: str, resample: str = "5min"):
     total  = df_counts.sum()
     print(f"Total samples: {total:,}  |  Classes: {labels}\n")
 
-    plot_byte_timeline(df_resampled,  save_path="byte_timeline.png")
-    plot_class_distribution(df_counts, save_path="dist_klasa.png")
-    plot_traffic_timeline(df_resampled, save_path="timeline_byte_rate.png")
-    plot_multi_metric(df_resampled,   save_path="multi_metrika.png")
+    plot_byte_timeline(df_resampled,  save_path="/graphs/byte_timeline.png")
+    plot_class_distribution(df_counts, save_path="graphs/dist_klasa.png")
+    plot_traffic_timeline(df_resampled, save_path="graphs/timeline_byte_rate.png")
+    plot_multi_metric(df_resampled,   save_path="graphs/multi_metrika.png")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ import torch.nn as nn
 import numpy as np
 import logging
 from typing import Optional
-from config import (
+from api.config import (
     MODEL_PATH,
     NUM_FEATURES,
     NUM_CLASSES,

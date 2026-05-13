@@ -430,7 +430,7 @@ def plot_confusion_matrix(y_true, y_pred, label_names: list[str]):
             ax.tick_params(axis="y", rotation=0)
 
         plt.tight_layout()
-        plt.savefig("confusion_matrix.png", dpi=150)
+        plt.savefig("/graphs/confusion_matrix.png", dpi=150)
         plt.show()
         print("Saved confusion matrix confusion_matrix.png")
     except Exception as e:
@@ -456,7 +456,7 @@ def plot_roc_curves(y_bin, all_probs, label_names: list[str]):
         plt.title("ROC curves by class (one-vs-rest)", fontsize=13)
         plt.legend(loc="lower right", fontsize=9)
         plt.tight_layout()
-        plt.savefig("roc_curves.png", dpi=150)
+        plt.savefig("graphs/roc_curves.png", dpi=150)
         plt.show()
         print("Saved ROC curve roc_curves.png")
 

@@ -11,120 +11,141 @@ import json
 from torch_nn import *
 
 
-# Opsezi hyperparametara za pretragu 
-
+# Opsezi hyperparametara za pretragu (po potrebi rekonfigurisati)
 HYPERPARAMETER_SPACE = {
-    "hidden_size":   [64, 128, 256, 512],
-    "num_layers":    [1, 2, 3],
-    "dropout":       (0.1, 0.5),       # Kontinualni opseg
-    "learning_rate": (1e-4, 1e-2),     # Log opseg
-    "batch_size":    [32, 64, 128],
-    "seq_len":       [20, 30, 50, 75],
+    "hidden_size":   [64, 128, 256],
+    "num_layers":    [1, 2],
+    "dropout":       (0.1, 0.4),
+    "learning_rate": (1e-4, 1e-2),
+    "seq_len":       [20, 30, 50],
 }
 
-N_TRIALS    = 50    # Broj Optuna trial-ova
-N_SPLITS    = 3     # Manji broj foldova zbog brzine tuninga
-EPOCHS      = 10    # Manji broj epocha tokom tuninga
-STUDY_NAME  = "ddos_lstm_attention_tuning"
+TUNING_BATCH_SIZE = 256
+TUNING_DATA_RATIO  = 0.3    # Koristi samo 30% dataseta tokom tuninga
+TUNING_EPOCHS      = 5     
+N_TRIALS   = 30   # Smanjeno sa 50 — TPE konvergira brze nego random search
+STUDY_NAME = "ddos_lstm_attention_tuning"
 
 
 # Optuna objective funkcija 
-
-def objective(trial: optuna.Trial, sequences: np.ndarray, labels: np.ndarray, num_features: int, num_classes: int, device) -> float:
+def objective_fast(trial: optuna.Trial,precomputed: dict, num_features: int, num_classes: int, device) -> float:
     """
-    Optuna poziva ovu funkciju za svaki trial.
-    Vraca prosecni val_loss kroz foldove — Optuna minimizuje ovu vrednost.
+    Brza verzija objective funkcije.
+    Koristi jedan train/val split umesto K-fold i pre-computed sekvence.
+    K-fold cross-validacija se radi samo sa najboljim hyperparametrima na kraju.
     """
     try:
-        #Predlozi hyperparametre za ovaj trial
         hidden_size   = trial.suggest_categorical("hidden_size",   HYPERPARAMETER_SPACE["hidden_size"])
-        num_layers    = trial.suggest_categorical("num_layers",    HYPERPARAMETER_SPACE["num_layers"])
-        dropout       = trial.suggest_float("dropout",             *HYPERPARAMETER_SPACE["dropout"])
-        learning_rate = trial.suggest_float("learning_rate",       *HYPERPARAMETER_SPACE["learning_rate"], log=True)
-        batch_size    = trial.suggest_categorical("batch_size",    HYPERPARAMETER_SPACE["batch_size"])
-        seq_len       = trial.suggest_categorical("seq_len",       HYPERPARAMETER_SPACE["seq_len"])
+        num_layers    = trial.suggest_categorical("num_layers",     HYPERPARAMETER_SPACE["num_layers"])
+        dropout       = trial.suggest_float("dropout",              *HYPERPARAMETER_SPACE["dropout"])
+        learning_rate = trial.suggest_float("learning_rate",        *HYPERPARAMETER_SPACE["learning_rate"], log=True)
+        batch_size    = TUNING_BATCH_SIZE   # Fiksan tokom tuninga radi brzine
+        seq_len       = trial.suggest_categorical("seq_len",        HYPERPARAMETER_SPACE["seq_len"])
 
-        # Sekvence se prave na osnovu predlozenog seq_len
-        seqs, lbls = _make_sequences(sequences, labels, seq_len)
-        dataset    = DDoSDataset(seqs, lbls)
-        tss        = TimeSeriesSplit(n_splits=N_SPLITS)
-        fold_losses = []
+        # Sekvence su vec preracunate
+        sequences, labels = precomputed[seq_len]
 
-        for fold, (train_idx, val_idx) in enumerate(tss.split(seqs)):
-            train_loader = DataLoader(
-                Subset(dataset, train_idx),
-                batch_size=batch_size,
-                shuffle=False,
-            )
-            val_loader = DataLoader(
-                Subset(dataset, val_idx),
-                batch_size=batch_size,
-                shuffle=False,
-            )
+        # Jedan temporalni split umesto K-fold
+        split     = int(len(sequences) * 0.8)
+        X_train   = torch.tensor(sequences[:split], dtype=torch.float32)
+        y_train   = torch.tensor(labels[:split],    dtype=torch.long)
+        X_val     = torch.tensor(sequences[split:], dtype=torch.float32)
+        y_val     = torch.tensor(labels[split:],    dtype=torch.long)
 
-            model = DDoSLSTMAttention(
-                input_size=num_features,
-                hidden_size=hidden_size,
-                num_layers=num_layers,
-                num_classes=num_classes,
-                dropout=dropout,
-            ).to(device)
+        train_loader = DataLoader(
+            DDoSDataset(sequences[:split], labels[:split]),
+            batch_size=batch_size, shuffle=False,
+        )
+        val_loader = DataLoader(
+            DDoSDataset(sequences[split:], labels[split:]),
+            batch_size=batch_size, shuffle=False,
+        )
 
-            optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-            criterion = nn.CrossEntropyLoss()
+        model = DDoSLSTMAttention(
+            input_size=num_features,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            num_classes=num_classes,
+            dropout=dropout,
+        ).to(device)
 
-            best_fold_loss = float("inf")
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        criterion = nn.CrossEntropyLoss()
 
-            for epoch in range(EPOCHS):
-                # Trening
-                model.train()
-                for X_batch, y_batch in train_loader:
-                    X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-                    optimizer.zero_grad()
-                    logits, _ = model(X_batch)
-                    loss = criterion(logits, y_batch)
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
+        best_val_loss = float("inf")
 
-                # Validacija
-                val_loss = _evaluate_loss(model, val_loader, criterion, device)
+        for epoch in range(TUNING_EPOCHS):
+            # Trening
+            model.train()
+            for X_batch, y_batch in train_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                optimizer.zero_grad()
+                logits, _ = model(X_batch)
+                loss = criterion(logits, y_batch)
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
-                if val_loss < best_fold_loss:
-                    best_fold_loss = val_loss
+            # Validacija
+            val_loss = _evaluate_loss(model, val_loader, criterion, device)
 
-                # Pruning — Optuna odustaje od obecavajucih trial-ova rano
-                trial.report(val_loss, step=fold * EPOCHS + epoch)
-                if trial.should_prune():
-                    raise optuna.exceptions.TrialPruned()
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
 
-            fold_losses.append(best_fold_loss)
+            # Pruning — zaustavlja lose trial-ove rano
+            trial.report(val_loss, step=epoch)
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
 
-        avg_loss = float(np.mean(fold_losses))
-        return avg_loss
+        return best_val_loss
 
     except optuna.exceptions.TrialPruned:
         raise
     except Exception as e:
-        print(f"Exception | objective: {e} Line: {sys.exc_info()[2].tb_lineno}")
+        print(f"Exception | objective_fast: {e} Line: {sys.exc_info()[2].tb_lineno}")
         return float("inf")
 
 
 # Pomocne funkcije
+def precompute_all_sequences(csv_path: str, seq_lens: list[int]) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    """
+    Ucitava CSV jednom i pravi sekvence za svaki seq_len unapred.
+    Cuva u recnik {seq_len: (sequences, labels)}.
+    Izbegava ponavljanje ovog posla unutar svake Optuna iteracije.
+    """
+    print("Pre-computing sequences for all seq_len values...")
 
-def _make_sequences(raw_sequences: np.ndarray, labels: np.ndarray, seq_len: int):
-    """
-    Pravi sekvence kliznim prozorom za dati seq_len.
-    Koristi se unutar objective f-je jer se seq_len tunira.
-    """
-    # raw_sequences su vec maksimalne duzine — uzimamo prvih seq_len kolona
-    if raw_sequences.shape[1] >= seq_len:
-        seqs = raw_sequences[:, :seq_len, :]
-        lbls = labels
-    else:
-        seqs = raw_sequences
-        lbls = labels
-    return seqs, lbls
+    # Ucitaj sirove podatke jednom
+    df = pd.read_csv(csv_path)
+    if "timestamp" in df.columns:
+        df = df.sort_values("timestamp").reset_index(drop=True)
+
+    feature_cols = [c for c in df.columns if c not in EXCLUDED_COLS]
+    X_raw = df[feature_cols].values.astype(np.float32)
+
+    label_enc = LabelEncoder()
+    label_enc.classes_ = np.array(LABELS)
+    Y_raw = label_enc.transform(df["label"].values)
+
+    scaler   = StandardScaler()
+    X_scaled = scaler.fit_transform(X_raw)
+
+    # Uzmemo samo TUNING_DATA_RATIO % podataka za tuning
+    n_samples  = int(len(X_scaled) * TUNING_DATA_RATIO)
+    X_subset   = X_scaled[:n_samples]
+    Y_subset   = Y_raw[:n_samples]
+
+    precomputed = {}
+    for seq_len in seq_lens:
+        seqs, lbls = [], []
+        for i in range(len(X_subset) - seq_len):
+            seqs.append(X_subset[i: i + seq_len])
+            lbls.append(Y_subset[i + seq_len - 1])
+        precomputed[seq_len] = (np.array(seqs), np.array(lbls))
+        print(f"  seq_len={seq_len:<4} -> {len(seqs):,} sequences")
+
+    print(f"Pre-computation done. Using {n_samples:,}/{len(X_scaled):,} samples for tuning.\n")
+    return precomputed, scaler, label_enc, len(feature_cols)
 
 
 @torch.no_grad()
@@ -158,75 +179,77 @@ def _print_trial_summary(trial: optuna.Trial):
 
 
 # Glavna funkcija za tuning 
-
-def run_hyperparameter_tuning(csv_path: str, results_path: str = "best_hyperparams.json"):
+def run_hyperparameter_tuning(csv_path: str,results_path: str = "best_hyperparams.json",):
     """
-    Pokrece Optuna hyperparameter tuning za LSTM+Attention model.
-    Na kraju cuva najbolje hyperparametre u JSON fajl.
-    Koristi TPE sampler — pametniji od random pretrage.
-    Koristi MedianPruner — zaustavlja lose trial-ove rano.
+    Dvofazni tuning:
+    Faza 1 - Brzi tuning na 30% podataka sa jednim foldom (Optuna)
+    Faza 2 - Cross-validacija samo sa najboljim hyperparametrima
     """
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using: {device}")
-        print(f"Starting hyperparameter tuning: {N_TRIALS} trials, {N_SPLITS} folds, {EPOCHS} epochs/fold\n")
 
-        # Ucitavanje podataka jednom — deli se kroz sve trial-ove
-        sequences, labels, scaler, le, feature_cols = prepare_data(csv_path, seq_len=max(HYPERPARAMETER_SPACE["seq_len"]))
-        num_features = len(feature_cols)
-        num_classes  = len(le.classes_)
+        # Pre-compute jednom za sve trial-ove
+        seq_lens = HYPERPARAMETER_SPACE["seq_len"]
+        precomputed, scaler, le, num_features = precompute_all_sequences(csv_path, seq_lens)
+        num_classes = len(le.classes_)
 
-        print(f"Dataset loaded: {len(sequences):,} sequences | Features: {num_features} | Classes: {num_classes}\n")
+        # Faza 1: Brzi Optuna tuning
+        print(f"Phase 1: Fast tuning ({N_TRIALS} trials, {TUNING_EPOCHS} epochs each)\n")
 
-        # Kreiranje Optuna study-a
         study = optuna.create_study(
             study_name=STUDY_NAME,
-            direction="minimize",        # Minimizujemo val_loss
-            sampler=TPESampler(seed=42), # TPE — uci iz prethodnih trial-ova
-            pruner=MedianPruner(
-                n_startup_trials=10,     # Prvih 10 trial-ova bez pruning-a
-                n_warmup_steps=5,        # Prvih 5 epocha bez pruning-a
-            ),
+            direction="minimize",
+            sampler=TPESampler(seed=42),
+            pruner=MedianPruner(n_startup_trials=10, n_warmup_steps=3),
         )
 
-        # Callback za stampanje posle svakog trial-a
         def trial_callback(study, trial):
             if trial.state == optuna.trial.TrialState.COMPLETE:
                 _print_trial_summary(trial)
                 if trial.number == study.best_trial.number:
-                    print(f"  *** New best trial! ***")
+                    print(f"  *** New best! ***")
+            elif trial.state == optuna.trial.TrialState.PRUNED:
+                print(f"  Trial {trial.number:>3} | Pruned")
 
         study.optimize(
-            lambda trial: objective(trial, sequences, labels, num_features, num_classes, device),
+            lambda trial: objective_fast(trial, precomputed, num_features, num_classes, device),
             n_trials=N_TRIALS,
             callbacks=[trial_callback],
             show_progress_bar=True,
         )
 
-        # ── Rezultati ─────────────────────────────────────────────────
         best = study.best_trial
         print(f"\n{'='*60}")
-        print(f"  Tuning finished | Best loss: {best.value:.4f}")
-        print(f"{'='*60}")
-        print(f"  Best hyperparameters:")
-        for k, v in best.params.items():
-            print(f"    {k:<20} {v}")
+        print(f"  Phase 1 done | Best loss: {best.value:.4f}")
+        print(f"  Best params: {best.params}")
         print(f"{'='*60}\n")
 
-        # Cuvanje najboljeg u JSON
+        # Faza 2: Cross-validacija sa najboljim parametrima 
+        print("Phase 2: Full cross-validation with best hyperparameters\n")
+
+        global HIDDEN_SIZE, NUM_LAYERS, DROPOUT, LEARNING_RATE, BATCH_SIZE, SEQUENCE_LEN, EPOCHS
+        HIDDEN_SIZE   = best.params["hidden_size"]
+        NUM_LAYERS    = best.params["num_layers"]
+        DROPOUT       = best.params["dropout"]
+        LEARNING_RATE = best.params["learning_rate"]
+        BATCH_SIZE    = best.params["batch_size"] if "batch_size" in best.params else 64
+        SEQUENCE_LEN  = best.params["seq_len"]
+        EPOCHS        = 20  # Vracamo pun broj epocha za finalni trening
+
+        cv_results = cross_validate(csv_path, save_path="ddos_best_model.pt")
+
+        # Cuvanje
         best_params = {
             **best.params,
-            "best_val_loss": best.value,
-            "n_trials":      N_TRIALS,
-            "study_name":    STUDY_NAME,
+            "best_tuning_loss": best.value,
+            "n_trials":         N_TRIALS,
         }
         with open(results_path, "w") as f:
             json.dump(best_params, f, indent=2)
-        print(f"Best hyperparameters saved -> {results_path}")
+        print(f"\nBest hyperparameters saved -> {results_path}")
 
-        # Optuna vizualizacije
         _plot_optuna_results(study)
-
         return best_params
 
     except Exception as e:

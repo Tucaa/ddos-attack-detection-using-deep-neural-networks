@@ -1,7 +1,9 @@
-version: '3.8'
+# Docker Compose configuration for DDoS Detection system
+# Contents: Ollama LLM engine + FastAPI inference service
 
 services:
 
+  # Ollama LLM engine
   llama-engine:
     image: ollama/ollama:latest
     container_name: llama-engine
@@ -16,6 +18,14 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
+    # Healthcheck — ceka dok Ollama API stvarno ne postane dostupan
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
     deploy:
       resources:
         reservations:
@@ -29,6 +39,29 @@ services:
     networks:
       - internal-net
 
+  # Ollama model init (pokrece se jednom, povlaci model ako ga nema)
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: ollama-init
+
+    depends_on:
+      llama-engine:
+        condition: service_healthy
+
+    # Zameni <ime-modela> sa stvarnim imenom, npr. llama3.2, mistral, itd.
+    entrypoint: >
+      sh -c "ollama pull llama3.1:8b"
+
+    environment:
+      - OLLAMA_HOST=http://llama-engine:11434
+
+    networks:
+      - internal-net
+
+    # Pokrecemo ga samo jednom pri compose up
+    restart: "no"
+
+  #FastAPI inference servis
   api-service:
     build:
       context: .
@@ -36,8 +69,10 @@ services:
 
     container_name: fast-api-app
 
+    # Ceka healthcheck llama-engine, ne samo pokretanje kontejnera
     depends_on:
-      - llama-engine
+      llama-engine:
+        condition: service_healthy
 
     ports:
       - "8000:8000"
@@ -57,6 +92,7 @@ services:
       --port 8000
       --reload
 
+    # GPU potreban za PyTorch LSTM inferencu
     deploy:
       resources:
         reservations:
@@ -69,6 +105,8 @@ services:
 
     networks:
       - internal-net
+
+# Volumes i mreže
 
 volumes:
   ollama_data:

@@ -1,7 +1,7 @@
 # Pydantic sheme za request i response objekte
 from pydantic import BaseModel, Field, model_validator
 from typing import List
-from config import WINDOW_SIZE, NUM_FEATURES, FEATURE_NAMES, CLASS_LABELS
+from api.config import WINDOW_SIZE, NUM_FEATURES, FEATURE_NAMES, CLASS_LABELS
 
 
 class TrafficSample(BaseModel):
@@ -75,3 +75,38 @@ class HealthResponse(BaseModel):
     window_size: int
     num_features: int
     classes: List[str]
+
+
+# Novo za ollamu
+class SimulateRequest(BaseModel):
+    attack_type: str = Field(
+        ...,
+        description="Tip napada koji Ollama treba da simulira",
+        examples=["syn-flood", "udp-flood-large", "dns-amplification"],
+    )
+
+
+class AttackAnalysis(BaseModel):
+    description: str = Field(
+        ...,
+        description="Tehnicki opis detektovanog napada"
+    )
+    mitigation_steps: list[str] = Field(
+        ...,
+        description="Konkretni koraci za mitigaciju napada"
+    )
+
+
+class SimulateResponse(BaseModel):
+    # Podaci o simulaciji
+    requested_attack_type: str
+    generated_window_size: int
+
+    # Rezultati LSTM modela
+    predicted_class: str
+    confidence: float
+    is_attack: bool
+    class_probabilities: dict[str, float]
+
+    # Ollama analiza
+    analysis: AttackAnalysis
