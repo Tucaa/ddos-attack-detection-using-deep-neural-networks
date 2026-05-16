@@ -96,3 +96,110 @@ class SimulateResponse(BaseModel):
     is_attack:             bool
     class_probabilities:   dict[str, float]
     analysis:              AttackAnalysis
+
+
+
+class ClassMetrics(BaseModel):
+    """Per-class metrike iz sklearn classification_report."""
+ 
+    precision: float
+    recall:    float
+    support:   int
+    # sklearn koristi "f1-score" sa crticom — alias omogucava oba oblika
+    f1_score:  float = Field(..., alias="f1-score")
+ 
+    model_config = {
+        # Dozvoljava i "f1_score" i "f1-score" pri deserijalizaciji
+        "populate_by_name": True,
+    }
+ 
+ 
+class AnalyzeRequest(BaseModel):
+    """
+    Ulazni podaci za /analyze endpoint.
+    Odgovaraju formatu koji generise metrics_exporter.export_metrics_to_json().
+    """
+ 
+    classification_report: dict[str, ClassMetrics] = Field(
+        ...,
+        description=(
+            "Per-class metrike iz sklearn classification_report. "
+            "Kljucevi su nazivi klasa, vrednosti su ClassMetrics objekti."
+        ),
+    )
+    confusion_matrix: list[list[int]] = Field(
+        ...,
+        description="2D matrica konfuzije (num_classes x num_classes).",
+    )
+    mcc_score: float = Field(
+        ...,
+        ge=-1.0,
+        le=1.0,
+        description="Matthews Correlation Coefficient.",
+    )
+    roc_auc_scores: dict[str, float] = Field(
+        ...,
+        description="Per-class ROC-AUC skorovi (one-vs-rest metoda).",
+    )
+ 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "classification_report": {
+                    "normal": {
+                        "precision": 0.98,
+                        "recall": 0.97,
+                        "f1-score": 0.975,
+                        "support": 1200,
+                    },
+                    "syn_flood": {
+                        "precision": 0.72,
+                        "recall": 0.68,
+                        "f1-score": 0.70,
+                        "support": 300,
+                    },
+                },
+                "confusion_matrix": [[1164, 36], [96, 204]],
+                "mcc_score": 0.812,
+                "roc_auc_scores": {"normal": 0.99, "syn_flood": 0.83},
+            }
+        }
+    }
+ 
+ 
+class AnalysisRecommendations(BaseModel):
+    """Preporuke za poboljsanje podeljene po kategorijama."""
+ 
+    data_generation: list[str] = Field(
+        ...,
+        description="Preporuke za unapredjenje sintetickog generatora podataka.",
+    )
+    model: list[str] = Field(
+        ...,
+        description="Preporuke za izmenu arhitekture ili hiperparametara LSTM-a.",
+    )
+    training: list[str] = Field(
+        ...,
+        description="Preporuke za izmenu strategije treniranja.",
+    )
+ 
+ 
+class AnalyzeResponse(BaseModel):
+    """
+    Izlaz /analyze endpointa — rezultat LangGraph analize.
+    """
+ 
+    weak_classes:       list[str]
+    per_class_analysis: str = Field(
+        ...,
+        description="Tehnicka analiza zasto odredjene klase imaju loše performanse.",
+    )
+    confusion_patterns: str = Field(
+        ...,
+        description="Analiza obrazaca gresaka u matrici konfuzije.",
+    )
+    recommendations:    AnalysisRecommendations
+    summary:            str = Field(
+        ...,
+        description="Kratak zakljucak sa prioritetnom akcijom za poboljsanje.",
+    )

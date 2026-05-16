@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import sys
 from functions import *
+from metrics_exporter import export_metrics_to_json
 
 
 SEQUENCE_LEN  = 50
@@ -561,7 +562,7 @@ def train_fold(model, train_loader, val_loader,criterion, optimizer, scheduler,d
         # Validacija
         model.eval()
         val_loss, val_correct = 0.0, 0
-        all_preds, all_targets = [], []
+        all_preds, all_targets, all_probs = [], [], []
 
         with torch.no_grad():
             for X_batch, y_batch in val_loader:
@@ -573,6 +574,8 @@ def train_fold(model, train_loader, val_loader,criterion, optimizer, scheduler,d
                 val_correct += (logits.argmax(dim=1) == y_batch).sum().item()
                 all_preds.extend(logits.argmax(dim=1).cpu().numpy())
                 all_targets.extend(y_batch.cpu().numpy())
+                # Verovatnoca po klasi — potrebna za ROC-AUC i metrics_exporter
+                all_probs.extend(torch.softmax(logits, dim=1).cpu().numpy())
 
         n_train = len(train_loader.dataset)
         n_val   = len(val_loader.dataset)
@@ -598,6 +601,7 @@ def train_fold(model, train_loader, val_loader,criterion, optimizer, scheduler,d
                 "mcc":       matthews_corrcoef(all_targets, all_preds),
                 "preds":     all_preds,
                 "targets":   all_targets,
+                "probs":     np.array(all_probs),   # Potrebno za ROC-AUC i export
             }
 
     return best_metrics
@@ -712,8 +716,37 @@ def cross_validate(csv_path: str, save_path: str = "ddos_lstm_attention.pt"):
             zero_division=0,
         ))
 
-        # Ovde treba da se doda kompletna metrtika confusion matrica f1metrika, roc krive ..... 
-        # NEOMOJ DA ZABORAVIS !!!!!!!!!!!!!!!!!!!!!!!!!!!
+        # --- Kompletna evaluacija najboljeg folda ---
+        # Koristimo preds/targets/probs sacuvane iz train_fold za best epoch
+
+        best_targets = np.array(best_fold["targets"])
+        best_preds   = np.array(best_fold["preds"])
+        best_probs   = best_fold["probs"]   # shape: (n_val_samples, num_classes)
+
+        # MCC za best fold
+        best_mcc = best_fold["mcc"]
+        print(f"Matthews Correlation Coefficient (best fold {best_fold['fold']}): {best_mcc:.4f}\n")
+
+        # Confusion matrix — apsolutna i normalizovana
+        plot_confusion_matrix(best_targets, best_preds, LABELS)
+
+        # ROC krive po klasi (one-vs-rest)
+        from sklearn.preprocessing import label_binarize
+        y_bin = label_binarize(best_targets, classes=list(range(num_classes)))
+        plot_roc_curves(y_bin, best_probs, LABELS)
+
+        # --- Export metrika u JSON za LangGraph analizu ---
+        print("Exporting evaluation metrics to JSON...")
+        json_path = export_metrics_to_json(
+            y_true=best_targets,
+            y_pred=best_preds,
+            y_proba=best_probs,
+            class_labels=LABELS,
+            output_dir="results/",
+            filename="eval_metrics.json",
+        )
+        print(f"Metrics saved -> {json_path}")
+        print("Run: GET /analyze/from-file?path=results/eval_metrics.json\n")
 
         print("Training finished!")
         return fold_metrics
@@ -800,4 +833,3 @@ if __name__ == "__main__":
     # dataloaders = make_dataloaders(path)
     # print(data)
     # print(dataloaders)
-

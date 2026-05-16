@@ -1,0 +1,202 @@
+{
+  "timestamp": "2026-05-16T23:29:33.829668",
+  "class_labels": [
+    "normal",
+    "udp_flood_large",
+    "dns_amplification",
+    "subnet_carpet_bombing",
+    "syn_flood",
+    "icmp_flood",
+    "udp_flood_mixed",
+    "ntp_amplification",
+    "ack_flood"
+  ],
+  "mcc_score": 0.9996443042695585,
+  "classification_report": {
+    "normal": {
+      "precision": 0.9987990151924578,
+      "recall": 0.9987990151924578,
+      "f1-score": 0.9987990151924578,
+      "support": 16653.0
+    },
+    "udp_flood_large": {
+      "precision": 0.9998250677862328,
+      "recall": 0.9995627841902763,
+      "f1-score": 0.9996939087848179,
+      "support": 11436.0
+    },
+    "dns_amplification": {
+      "precision": 0.9997200447928332,
+      "recall": 1.0,
+      "f1-score": 0.999860002799944,
+      "support": 10713.0
+    },
+    "subnet_carpet_bombing": {
+      "precision": 0.9998574449381074,
+      "recall": 0.999904958775869,
+      "f1-score": 0.9998812012925299,
+      "support": 42087.0
+    },
+    "syn_flood": {
+      "precision": 0.9998661222304036,
+      "recall": 0.9998661222304036,
+      "f1-score": 0.9998661222304036,
+      "support": 14939.0
+    },
+    "icmp_flood": {
+      "precision": 0.9991755976916735,
+      "recall": 1.0,
+      "f1-score": 0.9995876288659794,
+      "support": 6060.0
+    },
+    "udp_flood_mixed": {
+      "precision": 0.99962693527327,
+      "recall": 0.9998134328358209,
+      "f1-score": 0.9997201753567764,
+      "support": 10720.0
+    },
+    "ntp_amplification": {
+      "precision": 0.9998888024018682,
+      "recall": 0.9991111111111111,
+      "f1-score": 0.9994998054799088,
+      "support": 9000.0
+    },
+    "ack_flood": {
+      "precision": 1.0,
+      "recall": 0.9999081135716255,
+      "f1-score": 0.9999540546749368,
+      "support": 21766.0
+    },
+    "macro avg": {
+      "precision": 0.9996398922563162,
+      "recall": 0.9996628375452848,
+      "f1-score": 0.9996513238530839,
+      "support": 143374.0
+    },
+    "weighted avg": {
+      "precision": 0.999700117803346,
+      "recall": 0.9997000850921367,
+      "f1-score": 0.9997000807941748,
+      "support": 143374.0
+    }
+  },
+  "confusion_matrix": [
+    [
+      16633,
+      2,
+      2,
+      5,
+      2,
+      5,
+      3,
+      1,
+      0
+    ],
+    [
+      4,
+      11431,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      10713,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      4,
+      0,
+      0,
+      42083,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      14937,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0,
+      6060,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0,
+      0,
+      10718,
+      0,
+      0
+    ],
+    [
+      6,
+      0,
+      1,
+      0,
+      0,
+      0,
+      1,
+      8992,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      21764
+    ]
+  ],
+  "roc_auc_scores": {
+    "normal": 0.9999961900877311,
+    "udp_flood_large": 0.9999999589089115,
+    "dns_amplification": 0.999999990149151,
+    "subnet_carpet_bombing": 0.9999999535523749,
+    "syn_flood": 0.9999999947881119,
+    "icmp_flood": 0.9999999735615959,
+    "udp_flood_mixed": 0.9999998277136188,
+    "ntp_amplification": 0.99999994625283,
+    "ack_flood": 1.0
+  },
+  "summary": {
+    "macro_f1": 0.9996513238530839,
+    "weighted_f1": 0.9997000807941748,
+    "macro_precision": 0.9996398922563162,
+    "macro_recall": 0.9996628375452848,
+    "total_samples": 143374
+  }
+}

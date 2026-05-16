@@ -178,13 +178,7 @@ def generate_mixed_dataset(window_ms: int, days: int) -> list[dict]:
         print(f'Exception dataset_generator | generate_mixed_dataset: {e} Line: {sys.exc_info()[2].tb_lineno}')
 
         
-
-
-
-
-
-
-# Stara implementacija 
+# Stara implementacija nije se radio oversampling!
 def generate_mixed_dataset_old(window_ms: int, days: int) -> list[dict]:
     start_ts = int(time.time() * 1000)
     day_ms = 24 * 60 * 60 * 1000
