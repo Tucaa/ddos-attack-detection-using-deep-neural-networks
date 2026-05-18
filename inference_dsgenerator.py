@@ -7,9 +7,8 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-# -------------------------------------------------------------------
+
 # Ciljna lista feature-a (Redosled je ključan za model!)
-# -------------------------------------------------------------------
 TARGET_FEATURES = [
     'packet_rate', 'byte_rate', 'avg_packet_size', 'std_packet_size',
     'udp_ratio', 'tcp_ratio', 'icmp_ratio', 'tcp_syn_ratio',

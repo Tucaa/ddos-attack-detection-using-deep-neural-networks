@@ -48,7 +48,8 @@ services:
       llama-engine:
         condition: service_healthy
 
-    # Zameni <ime-modela> sa stvarnim imenom, npr. llama3.2, mistral, itd.
+
+    # Verzija modela
     entrypoint: >
       sh -c "ollama pull llama3.1:8b"
 
@@ -61,7 +62,7 @@ services:
     # Pokrecemo ga samo jednom pri compose up
     restart: "no"
 
-  #FastAPI inference servis
+  # FastAPI inference servis
   api-service:
     build:
       context: .
@@ -83,6 +84,9 @@ services:
 
     volumes:
       - .:/app
+      # Anonimni volume koji prekriva realdataset/ unutar kontejnera —
+      # folder ostaje na hostu ali nije dostupan u runtime okruzenju
+      - /app/realdataset
 
     working_dir: /app
 
@@ -106,7 +110,7 @@ services:
     networks:
       - internal-net
 
-# Volumes i mreže
+# Volumes i mreze
 
 volumes:
   ollama_data:

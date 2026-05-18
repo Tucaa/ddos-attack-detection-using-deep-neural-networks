@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir \
 # Ostale zavisnosti
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# COPY . . je uklonjen — kod dolazi preko volume monta u docker-compose.yml
+# Na ovaj nacin image ne sadrzi source code, a --reload radi ispravno
 
 EXPOSE 8000

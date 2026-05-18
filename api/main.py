@@ -23,9 +23,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 VALID_ATTACK_TYPES = {
-    "udp-flood-large", "dns-amplification", "subnet-carpet-bombing",
-    "syn-flood", "icmp-flood", "udp-flood-mixed",
-    "ntp-amplification", "ack-flood", "normal",
+    "udp_flood_large", "dns_amplification", "subnet_carpet_bombing",
+    "syn_flood", "icmp_flood", "udp_flood_mixed",
+    "ntp_amplification", "ack_flood", "normal",
 }
 
 
@@ -143,7 +143,7 @@ async def predict_file(file: UploadFile = File(...)):
 @app.post("/simulate", response_model=SimulateResponse, tags=["Inference"])
 async def simulate(request: SimulateRequest):
     """
-    Kompletan pipeline: Ollama generise scenario → LSTM klasifikuje →
+    Kompletan pipeline: Ollama generise scenario => LSTM klasifikuje =>
     Ollama analizira i generise mitigaciju.
     """
     if not model_wrapper.is_loaded:
@@ -153,19 +153,15 @@ async def simulate(request: SimulateRequest):
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Nepoznat tip napada: '{request.attack_type}'. "
-                f"Validni tipovi: {sorted(VALID_ATTACK_TYPES)}"
+                f"Invalid attack type: '{request.attack_type}'. "
+                f"Valid attack types: {sorted(VALID_ATTACK_TYPES)}"
             ),
         )
 
     # Korak 1: Ollama generise matricu saobracaja
     logger.info(f"[simulate] Generating scenario for: {request.attack_type}")
     try:
-        matrix = await generate_attack_scenario(
-            attack_type=request.attack_type,
-            window_size=WINDOW_SIZE,
-            feature_names=FEATURE_NAMES,
-        )
+        matrix = await generate_attack_scenario(attack_type=request.attack_type,window_size=WINDOW_SIZE, feature_names=FEATURE_NAMES)
     except (ValueError, RuntimeError) as e:
         logger.error(f"[simulate] Scenario generation error: {e}")
         raise HTTPException(status_code=502, detail=f"Ollama scenario error: {e}")

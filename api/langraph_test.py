@@ -160,7 +160,7 @@ async def run_test(metrics_path: str, ollama_url: str):
 
     # Pravljenje inicijalnog stanja
     print("\n[3/4] Running LangGraph graph...")
-    print("  Nodes: analyze_per_class → analyze_confusion → synthesize")
+    print("  Nodes: analyze_per_class => analyze_confusion => synthesize")
     print("  (Each node calls Ollama — this may take 30-90s)\n")
 
     initial_state = {
