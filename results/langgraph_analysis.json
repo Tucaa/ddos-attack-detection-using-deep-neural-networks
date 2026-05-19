@@ -1,0 +1,45 @@
+{
+  "weak_classes": [
+    "icmp_flood"
+  ],
+  "per_class_analysis": "The ICMP flood class underperforms due to overlapping feature patterns with other attack types, making it challenging for the model to distinguish between them. The relatively low MCC delta (+0.0000) compared to previous runs suggests that this is a persistent issue rather than an isolated anomaly.",
+  "confusion_analysis": "The model appears to struggle with distinguishing between udp_flood_large and normal traffic, as well as subnet_carpet_bombing and normal traffic. This may be due to similar network signatures and feature space overlap between these classes. The model also seems to have difficulty distinguishing between icmp_flood and other classes, which is consistent with the previously identified weak class. Additionally, the model appears to over-predict 'normal' traffic in cases where it should be predicting udp_flood_large or subnet_carpet_bombing.",
+  "recommendations": {
+    "data_generation": [
+      "Adjust the noise standard deviation for packet_size and packets_per_second features to 0.5 from 1.0 to reduce over-smoothing.",
+      "Increase minority class oversampling ratio to 2:1 from 1:1 for ICMP flood class.",
+      "Modify transition blending window to have a more gradual transition period of 10 seconds instead of sudden changes.",
+      "Add feature correlations specific to attack types, such as 'dst_port' and 'protocol', by creating new features that capture these relationships."
+    ],
+    "model": [
+      "Increase hidden_size to 128 from 64 for both LSTM layers to improve model capacity.",
+      "Add a bidirectional LSTM layer after the attention mechanism to better capture temporal dependencies.",
+      "Adjust dropout rate to 0.2 from 0.1 to prevent overfitting and improve generalization."
+    ],
+    "training": [
+      "Replace CrossEntropyLoss with Focal Loss to reduce class imbalance issues and focus on hard-to-predict classes like ICMP flood.",
+      "Implement mixup augmentation by randomly replacing input data with a convex combination of other samples from the same class."
+    ]
+  },
+  "summary": "The current model has an MCC of 0.9996, showing no regression from previous runs but struggling to distinguish between specific attack types and normal traffic. The highest-priority improvement action is to adjust the noise standard deviation for key features and increase minority class oversampling ratio for ICMP flood class.",
+  "metrics_delta": {
+    "mcc_delta": 0.0,
+    "macro_f1_delta": null,
+    "per_class_f1_delta": {
+      "normal": 0.0,
+      "udp_flood_large": 0.0,
+      "dns_amplification": 0.0,
+      "subnet_carpet_bombing": 0.0,
+      "syn_flood": 0.0,
+      "icmp_flood": 0.0,
+      "udp_flood_mixed": 0.0,
+      "ntp_amplification": 0.0,
+      "ack_flood": 0.0,
+      "macro avg": 0.0,
+      "weighted avg": 0.0
+    }
+  },
+  "regression_detected": false,
+  "elapsed_seconds": 52.27,
+  "source_metrics": "results/eval_metrics.json"
+}

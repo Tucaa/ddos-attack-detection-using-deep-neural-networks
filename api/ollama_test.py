@@ -114,7 +114,7 @@ async def test_raw_generate(ollama_host: str, model: str) -> bool:
     ok(f"Response text: '{response_text}'")
     return True
 
-
+# Ovaj test pada LLM se cesto gubi kod generisanja matrice. Ili ces da izbacis ili da smislis nesto optimalnije
 async def test_generate_scenario(ollama_host: str, model: str, attack_type: str) -> bool:
     """
     Testira generisanje matrice saobracaja za zadati tip napada.

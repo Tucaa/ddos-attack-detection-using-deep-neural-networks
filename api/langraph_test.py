@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -9,15 +10,15 @@ from pathlib import Path
 # Funkcija za interaktivni unos od strane korisnika
 def get_user_input():
     print("=" * 65)
-    print("  LANGGRAPH ANALYZER — KONFIGURACIJA")
+    print("  LANGGRAPH ANALYZER — CONFIGURATION")
     print("=" * 65)
     
     # Unos putanje za metrike
-    metrics_input = input("Unesite putanju do fajla sa metrikama (default: results/test_metrics.json): ").strip()
+    metrics_input = input("Enter path to metrics file (default: results/test_metrics.json): ").strip()
     metrics_path = metrics_input if metrics_input else "results/test_metrics.json"
     
     # Unos Ollama URL-a
-    ollama_input = input("Unesite Ollama host URL (default: OLLAMA_HOST env var ili http://localhost:11434): ").strip()
+    ollama_input = input("Enter Ollama host url (default: OLLAMA_HOST env var ili http://localhost:11434): ").strip()
     ollama_url = ollama_input if ollama_input else None
     
     return metrics_path, ollama_url
@@ -53,6 +54,35 @@ def _print_list(items: list[str], indent: int = 4):
 def _print_results(state: dict):
     """Stampa rezultate LangGraph analize u citljivom formatu."""
     _section("LANGGRAPH ANALYSIS RESULTS")
+
+    # Delta metrike vs prethodni run
+    delta = state.get("metrics_delta", {})
+    if delta.get("mcc_delta") is not None:
+        print("\n  Comparison with previous run:")
+        mcc_d = delta["mcc_delta"]
+        f1_d  = delta.get("macro_f1_delta")
+        reg   = state.get("regression_detected", False)
+
+        mcc_arrow = "▲" if mcc_d >= 0 else "▼"
+        print(f"    MCC:      {mcc_arrow} {mcc_d:+.4f}")
+        if f1_d is not None:
+            f1_arrow = "▲" if f1_d >= 0 else "▼"
+            print(f"    Macro F1: {f1_arrow} {f1_d:+.4f}")
+
+        per_cls = delta.get("per_class_f1_delta", {})
+        if per_cls:
+            regressions = [(c, v) for c, v in per_cls.items() if v < -0.03]
+            if regressions:
+                print("    Regressions (F1 drop > 0.03):")
+                for cls, v in regressions:
+                    print(f"      ! {cls}: {v:+.3f}")
+
+        if reg:
+            print("    *** REGRESSION DETECTED — model is worse than previous run ***")
+        else:
+            print("    No significant regression detected.")
+    else:
+        print("\n  Comparison with previous run: N/A (first run or no baseline)")
 
     # Slabe klase
     print("\n  Weak classes (f1 < 0.80 | recall < 0.75 | roc_auc < 0.85):")
@@ -160,22 +190,44 @@ async def run_test(metrics_path: str, ollama_url: str):
 
     # Pravljenje inicijalnog stanja
     print("\n[3/4] Running LangGraph graph...")
-    print("  Nodes: analyze_per_class => analyze_confusion => synthesize")
-    print("  (Each node calls Ollama — this may take 30-90s)\n")
+    print("  Nodes: load_and_compare => analyze_per_class => analyze_confusion => synthesize")
+    print("  (Ollama nodes may take 30-90s)\n")
+
+    # Backup trenutnih metrika u _prev pre pokretanja grafa
+    # Graf ce sam ucitati _prev iz diska u node_load_and_compare_metrics
+    prev_path = p.parent / "test_metrics_prev.json"
+    if p.exists():
+        shutil.copy(p, prev_path)
+        print(f"  Backed up current metrics -> {prev_path}")
 
     initial_state = {
+        # Ulazne metrike (trenutni run)
         "classification_report": metrics["classification_report"],
         "confusion_matrix":      metrics["confusion_matrix"],
-        "mcc_score":              metrics["mcc_score"],
+        "mcc_score":             metrics["mcc_score"],
         "roc_auc_scores":        metrics["roc_auc_scores"],
         "class_labels":          metrics["class_labels"],
-        # Medjurezultati
-        "per_class_analysis":    "",
-        "confusion_analysis":    "",
-        # Izlaz
-        "weak_classes":          [],
-        "recommendations":       {},
-        "summary":               "",
+
+        # Poređenje — puni ih node_load_and_compare_metrics
+        "previous_metrics":    {},
+        "metrics_delta":       {},
+        "regression_detected": False,
+
+        # Medjurezultati analize
+        "per_class_analysis":  "",
+        "confusion_analysis":  "",
+
+        # Izlaz analize
+        "weak_classes":    [],
+        "recommendations": {},
+        "summary":         "",
+
+        # Decision i akcija — popunjavaju se u kasnijim koracima
+        "decision":            "",
+        "proposed_hyperparams": {},
+        "human_confirmed":     False,
+        "retrain_triggered":   False,
+        "retrain_command":     "",
     }
 
     t_start = time.time()
@@ -196,11 +248,16 @@ async def run_test(metrics_path: str, ollama_url: str):
     # Cuvanje rezultata
     output_path = Path(metrics_path).parent / "langgraph_analysis.json"
     output = {
+        # Analiza
         "weak_classes":       final_state["weak_classes"],
         "per_class_analysis": final_state["per_class_analysis"],
         "confusion_analysis": final_state["confusion_analysis"],
         "recommendations":    final_state["recommendations"],
         "summary":            final_state["summary"],
+        # Delta vs prethodni run
+        "metrics_delta":      final_state.get("metrics_delta", {}),
+        "regression_detected": final_state.get("regression_detected", False),
+        # Meta
         "elapsed_seconds":    round(elapsed, 2),
         "source_metrics":     str(metrics_path),
     }

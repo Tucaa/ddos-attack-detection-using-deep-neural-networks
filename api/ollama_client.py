@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import random
 
 import httpx
 
@@ -120,11 +121,31 @@ async def generate_attack_scenario(attack_type: str, window_size: int, feature_n
         logger.error(f"Ollama returned invalid JSON for scenario: {e}\nRaw: {raw[:300]}")
         raise ValueError(f"Ollama did not return valid JSON: {e}")
 
-    if not isinstance(matrix, list) or len(matrix) != window_size:
-        raise ValueError(
-            f"Expected {window_size} rows, got "
-            f"{len(matrix) if isinstance(matrix, list) else 'not a list'}"
+    if not isinstance(matrix, list):
+        raise ValueError("Ollama did not return a valid JSON list.")
+
+    # Ako je model napravio više redova odseca se visak
+    if len(matrix) > window_size:
+        logger.warning(
+            f"Ollama generated {len(matrix)} rows instead of {window_size}. Slicing to fit."
         )
+        matrix = matrix[:window_size]
+
+    elif len(matrix) < window_size:
+        missing = window_size - len(matrix)
+
+        logger.warning(
+            f"Ollama generated insufficient rows. Expected {window_size}, got {len(matrix)}. "
+            f"Duplicating {missing} random existing rows."
+        )
+
+        if not matrix:
+            raise ValueError("Ollama returned an empty matrix.")
+
+        # Nasumično kopiranje postojećih redova
+        extra_rows = random.choices(matrix, k=missing)
+
+        matrix.extend(extra_rows)
 
     try:
         matrix = [[max(0.0, float(v)) for v in row] for row in matrix]
