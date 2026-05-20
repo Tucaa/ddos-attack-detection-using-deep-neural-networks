@@ -309,7 +309,7 @@ Preprocessor for converting real-world **CIC-DDoS2019** dataset CSV files into t
 **1. Install dependencies**
 
 ```bash
-pip install torch scikit-learn pandas numpy matplotlib seaborn optuna
+pip install torch scikit-learn pandas numpy matplotlib seaborn optuna tensorflow
 ```
 
 **2. Generate a synthetic dataset**

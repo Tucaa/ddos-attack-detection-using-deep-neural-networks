@@ -81,6 +81,9 @@ services:
     environment:
       - OLLAMA_HOST=http://llama-engine:11434
       - CUDA_VISIBLE_DEVICES=0
+      # Sprečava TensorFlow da odmah alocira 100% VRAM-a, ostavljajući prostor za PyTorch i Ollama-u
+      - TF_FORCE_GPU_ALLOW_GROWTH=true 
+      - TF_CPP_MIN_LOG_LEVEL=2
 
     volumes:
       - .:/app

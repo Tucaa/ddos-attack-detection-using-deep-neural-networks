@@ -1,27 +1,29 @@
 {
   "weak_classes": [
-    "icmp_flood"
+    "udp_flood_mixed",
+    "subnet_carpet_bombing",
+    "ack_flood"
   ],
-  "per_class_analysis": "The ICMP flood class underperforms due to overlapping feature patterns with other attack types, making it challenging for the model to distinguish between them. The relatively low MCC delta (+0.0000) compared to previous runs suggests that this is a persistent issue rather than an isolated anomaly.",
-  "confusion_analysis": "The model appears to struggle with distinguishing between udp_flood_large and normal traffic, as well as subnet_carpet_bombing and normal traffic. This may be due to similar network signatures and feature space overlap between these classes. The model also seems to have difficulty distinguishing between icmp_flood and other classes, which is consistent with the previously identified weak class. Additionally, the model appears to over-predict 'normal' traffic in cases where it should be predicting udp_flood_large or subnet_carpet_bombing.",
+  "per_class_analysis": "The LSTM model underperforms in classes with overlapping traffic patterns, such as udp_flood_mixed and udp_flood_large. Additionally, the model has difficulties distinguishing subnet_carpet_bombing from other attack types due to similarities in packet sizes. Ack_flood also suffers from limited diversity in synthetic data generation, leading to poor classification results.",
+  "confusion_analysis": "The model exhibits a tendency to confuse 'udp_flood_large' with 'subnet_carpet_bombing', possibly due to the similarity in their traffic signatures. Conversely, it often misclassifies 'normal' as 'udp_flood_mixed', suggesting that the model struggles to distinguish between benign and malicious UDP traffic. The confusion of 'ntp_amplification' with 'ack_flood' may indicate a systematic bias towards over-predicting certain types of attacks. Furthermore, the model seems to have difficulties distinguishing between various flood-based attacks, such as 'syn_flood', 'icmp_flood', and 'udp_flood_mixed'.",
   "recommendations": {
     "data_generation": [
-      "Adjust the noise standard deviation for packet_size and packets_per_second features to 0.5 from 1.0 to reduce over-smoothing.",
-      "Increase minority class oversampling ratio to 2:1 from 1:1 for ICMP flood class.",
-      "Modify transition blending window to have a more gradual transition period of 10 seconds instead of sudden changes.",
-      "Add feature correlations specific to attack types, such as 'dst_port' and 'protocol', by creating new features that capture these relationships."
+      "Increase minority class oversampling ratio to 1.5 for udp_flood_mixed and subnet_carpet_bombing classes",
+      "Adjust noise std per feature: decrease packet_size variance by 20% and increase bytes_per_second variance by 15%",
+      "Modify transition blending window to 30 samples with a 50/50 blend ratio for better representation of attack patterns"
     ],
     "model": [
-      "Increase hidden_size to 128 from 64 for both LSTM layers to improve model capacity.",
-      "Add a bidirectional LSTM layer after the attention mechanism to better capture temporal dependencies.",
-      "Adjust dropout rate to 0.2 from 0.1 to prevent overfitting and improve generalization."
+      "Increase hidden size of LSTM layers from 128 to 256 for better feature extraction",
+      "Add bidirectional LSTM to capture both forward and backward dependencies in time series data",
+      "Adjust dropout rate from 0.2 to 0.1 to reduce overfitting on attack-specific patterns"
     ],
     "training": [
-      "Replace CrossEntropyLoss with Focal Loss to reduce class imbalance issues and focus on hard-to-predict classes like ICMP flood.",
-      "Implement mixup augmentation by randomly replacing input data with a convex combination of other samples from the same class."
+      "Use Focal Loss instead of CrossEntropyLoss to give more importance to rare classes (udp_flood_mixed, subnet_carpet_bombing)",
+      "Implement mixup augmentation with a 20% probability to generate synthetic samples that are linear combinations of original inputs",
+      "Increase early stopping patience from 10 to 15 epochs for more robust convergence"
     ]
   },
-  "summary": "The current model has an MCC of 0.9996, showing no regression from previous runs but struggling to distinguish between specific attack types and normal traffic. The highest-priority improvement action is to adjust the noise standard deviation for key features and increase minority class oversampling ratio for ICMP flood class.",
+  "summary": "The current LSTM model achieves an overall MCC of 0.7841, but struggles with distinguishing between specific attack types (udp_flood_mixed, subnet_carpet_bombing) and misclassifying benign traffic as malicious. To address this, increasing minority class oversampling ratio and adjusting noise std per feature are the top recommendations.",
   "metrics_delta": {
     "mcc_delta": 0.0,
     "macro_f1_delta": null,
@@ -34,12 +36,10 @@
       "icmp_flood": 0.0,
       "udp_flood_mixed": 0.0,
       "ntp_amplification": 0.0,
-      "ack_flood": 0.0,
-      "macro avg": 0.0,
-      "weighted avg": 0.0
+      "ack_flood": 0.0
     }
   },
   "regression_detected": false,
-  "elapsed_seconds": 52.27,
-  "source_metrics": "results/eval_metrics.json"
+  "elapsed_seconds": 55.2,
+  "source_metrics": "results/test_metrics.json"
 }

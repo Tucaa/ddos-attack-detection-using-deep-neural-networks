@@ -63,10 +63,10 @@ def _print_results(state: dict):
         f1_d  = delta.get("macro_f1_delta")
         reg   = state.get("regression_detected", False)
 
-        mcc_arrow = "▲" if mcc_d >= 0 else "▼"
+        mcc_arrow = "^" if mcc_d >= 0 else "v"
         print(f"    MCC:      {mcc_arrow} {mcc_d:+.4f}")
         if f1_d is not None:
-            f1_arrow = "▲" if f1_d >= 0 else "▼"
+            f1_arrow = "^" if f1_d >= 0 else "v"
             print(f"    Macro F1: {f1_arrow} {f1_d:+.4f}")
 
         per_cls = delta.get("per_class_f1_delta", {})
@@ -114,6 +114,27 @@ def _print_results(state: dict):
 
     _section("CONCLUSION")
     print(state.get("summary", "(empty)"))
+
+    # Decision rezultat
+    decision = state.get("decision", "")
+    if decision:
+        _section("DECISION")
+        labels = {
+            "SUGGEST_ONLY": "Suggestions only — model performance is acceptable.",
+            "SCAN_FIRST":   "Codebase scanned — review proposed changes before retraining.",
+            "RETRAIN":      "Retraining recommended — MCC below critical threshold.",
+        }
+        print(f" => {decision}: {labels.get(decision, '')}")
+
+    # Skenirani fajlovi (samo nazivi i velicina, ne sadrzaj)
+    scanned = state.get("scanned_files", {})
+    if scanned:
+        print(f"\n  Scanned files ({len(scanned)}):")
+        for fname, content in scanned.items():
+            if content.startswith("["):
+                print(f"    [ERROR] {fname}")
+            else:
+                print(f"    [OK]    {fname}  ({len(content)} chars)")
 
     print()
     _separator()
@@ -190,15 +211,8 @@ async def run_test(metrics_path: str, ollama_url: str):
 
     # Pravljenje inicijalnog stanja
     print("\n[3/4] Running LangGraph graph...")
-    print("  Nodes: load_and_compare => analyze_per_class => analyze_confusion => synthesize")
+    print("  Nodes: load_and_compare=> analyze_per_class=> analyze_confusion=> synthesize=> decision=> [scan_codebase]")
     print("  (Ollama nodes may take 30-90s)\n")
-
-    # Backup trenutnih metrika u _prev pre pokretanja grafa
-    # Graf ce sam ucitati _prev iz diska u node_load_and_compare_metrics
-    prev_path = p.parent / "test_metrics_prev.json"
-    if p.exists():
-        shutil.copy(p, prev_path)
-        print(f"  Backed up current metrics -> {prev_path}")
 
     initial_state = {
         # Ulazne metrike (trenutni run)
@@ -223,11 +237,12 @@ async def run_test(metrics_path: str, ollama_url: str):
         "summary":         "",
 
         # Decision i akcija — popunjavaju se u kasnijim koracima
-        "decision":            "",
+        "decision":             "",
+        "scanned_files":        {},
         "proposed_hyperparams": {},
-        "human_confirmed":     False,
-        "retrain_triggered":   False,
-        "retrain_command":     "",
+        "human_confirmed":      False,
+        "retrain_triggered":    False,
+        "retrain_command":      "",
     }
 
     t_start = time.time()
@@ -240,6 +255,12 @@ async def run_test(metrics_path: str, ollama_url: str):
         sys.exit(1)
 
     elapsed = time.time() - t_start
+
+    # Backup trenutnih metrika u _prev — radi se POSLE uspesnog run-a
+    # kako bi sledeci run imao tacne prethodne metrike za poredenje
+    prev_path = p.parent / "test_metrics_prev.json"
+    shutil.copy(p, prev_path)
+    print(f"  Metrics backed up for next run -> {prev_path}")
 
     # Rezultati
     print(f"[4/4] Graph finished in {elapsed:.1f}s")

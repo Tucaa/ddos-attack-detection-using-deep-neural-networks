@@ -17,6 +17,9 @@ RUN pip install --no-cache-dir \
     torchaudio==2.5.1+cu121 \
     --index-url https://download.pytorch.org/whl/cu121
 
+# Za tensoflow i cudu
+RUN pip install --no-cache-dir tensorflow[and-cuda]==2.21.0
+
 # Ostale zavisnosti
 RUN pip install --no-cache-dir -r requirements.txt
 

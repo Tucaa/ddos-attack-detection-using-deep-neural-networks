@@ -18,35 +18,63 @@ logger = logging.getLogger(__name__)
 METRICS_PATH      = Path("results/test_metrics.json")
 PREV_METRICS_PATH = Path("results/test_metrics_prev.json")
 
+# Pragovi za decision logiku — cisti Python, bez LLM-a
+DECISION_RETRAIN_MCC    = 0.75   # MCC ispod ovoga => obavezno RETRAIN
+DECISION_SCAN_MCC       = 0.85   # MCC ispod ovoga => SCAN_FIRST
+# Iznad DECISION_SCAN_MCC i bez regresije => SUGGEST_ONLY
 
-# ---------------------------------------------------------------------------
+# Mapiranje: tip napada => fajlovi relevantni za skeniranje
+# Uvek se citaju config.py i hyperparam.py
+ALWAYS_SCAN = ["hyperparam.py", "config.py"]
+
+# Fajlovi relevantni po klasi slabih performansi
+CLASS_TO_FILES: dict[str, list[str]] = {
+    "udp_flood_large":       ["attacks.py", "dataset_generator.py"],
+    "udp_flood_mixed":       ["attacks.py", "dataset_generator.py"],
+    "dns_amplification":     ["attacks.py", "dataset_generator.py"],
+    "ntp_amplification":     ["attacks.py", "dataset_generator.py"],
+    "syn_flood":             ["attacks.py", "windowing.py"],
+    "ack_flood":             ["attacks.py", "windowing.py"],
+    "icmp_flood":            ["attacks.py", "dataset_generator.py"],
+    "subnet_carpet_bombing": ["attacks.py", "dataset_generator.py"],
+    "normal":                ["dataset_generator.py", "normal.py"],
+}
+
+# Maksimalan broj karaktera po fajlu koji se prosledjuje LLM-u
+# (sprecava prekoracenje kontekst prozora Ollame)
+SCAN_MAX_CHARS_PER_FILE = 3000
+
+# Folderi koji se preskacaju pri rekurzivnom skeniranju
+SCAN_SKIP_DIRS: set[str] = {"__pycache__", "venv", ".venv", ".git", ".idea"}
+
+
 # State
-# ---------------------------------------------------------------------------
 
 class MetricsState(TypedDict):
-    # --- Ulaz (trenutni run) ---
+    # Ulaz (trenutni run) 
     classification_report: dict   # {klasa: {precision, recall, f1-score, support}}
     confusion_matrix: list        # 2D lista integera (num_classes x num_classes)
     mcc_score: float
     roc_auc_scores: dict          # {klasa: float}
     class_labels: list            # lista naziva klasa u ispravnom redosledu
 
-    # --- Poređenje sa prethodnim runom ---
+    # Poredjenje sa prethodnim runom 
     previous_metrics: dict        # sadrzaj test_metrics_prev.json, {} ako ne postoji
     metrics_delta: dict           # {mcc_delta, macro_f1_delta, per_class_f1_delta: {klasa: delta}}
     regression_detected: bool     # True ako je bilo koji indikator gori nego pre
 
-    # --- Medjurezultati analize ---
+    # Medjurezultati analize
     per_class_analysis: str
     confusion_analysis: str
 
-    # --- Izlaz analize ---
+    # Izlaz analize 
     weak_classes: list            # nazivi klasa sa losim performansama
     recommendations: dict         # {data_generation: [], model: [], training: []}
     summary: str
 
-    # --- Decision i akcija ---
+    # Decision i akcija
     decision: str                 # "SUGGEST_ONLY" | "SCAN_FIRST" | "RETRAIN"
+    scanned_files: dict           # {filename: sadrzaj} — puni node_scan_codebase
     proposed_hyperparams: dict    # predlozene vrednosti iz HYPERPARAMETER_SPACE
     human_confirmed: bool         # da li je korisnik potvrdio retrain
     retrain_triggered: bool       # da li je retrain pokrenut
@@ -54,7 +82,11 @@ class MetricsState(TypedDict):
 
 
 
-def _format_per_class_metrics(report: dict, roc_auc: dict, mcc: float) -> str:
+def _format_per_class_metrics(
+    report: dict,
+    roc_auc: dict,
+    mcc: float,
+) -> str:
     """Formatira per-class metrike u citljiv string za LLM prompt."""
     lines = [f"Overall MCC: {mcc:.4f}\n"]
     for cls, m in report.items():
@@ -94,9 +126,7 @@ def _safe_parse_json(raw: str, fallback: dict) -> dict:
         return fallback
 
 
-# ---------------------------------------------------------------------------
-# Helper: računanje delte između dva run-a
-# ---------------------------------------------------------------------------
+# Helper: racunanje delte izmedju dva run-a
 
 def _compute_delta(current: dict, previous: dict) -> tuple[dict, bool]:
     """
@@ -157,23 +187,21 @@ def _compute_delta(current: dict, previous: dict) -> tuple[dict, bool]:
     return delta, regression
 
 
-# ---------------------------------------------------------------------------
-# Node 0: Učitavanje i poređenje metrika
-# ---------------------------------------------------------------------------
+# Node 0: Ucitavanje i poredjenje metrika
 
 async def node_load_and_compare_metrics(state: MetricsState) -> dict:
     """
-    Učitava prethodni run iz test_metrics_prev.json (ako postoji) i
-    računa delta vrednosti u odnosu na trenutne metrike.
+    Ucitava prethodni run iz test_metrics_prev.json (ako postoji) i
+    racuna delta vrednosti u odnosu na trenutne metrike.
 
     Popunjava: previous_metrics, metrics_delta, regression_detected
 
-    Ne poziva Ollama — čista Python logika.
-    Mora biti prvi čvor u grafu jer ostali čvorovi koriste delta kontekst.
+    Ne poziva Ollama — cista Python logika.
+    Mora biti prvi cvor u grafu jer ostali cvorovi koriste delta kontekst.
     """
     logger.info("[LangGraph] node_load_and_compare_metrics: start")
 
-    # Pokušaj učitavanja prethodnih metrika
+    # Pokusaj ucitavanja prethodnih metrika
     previous: dict = {}
     if PREV_METRICS_PATH.exists():
         try:
@@ -189,16 +217,16 @@ async def node_load_and_compare_metrics(state: MetricsState) -> dict:
     else:
         logger.info("  No previous metrics file found — this is treated as first baseline run.")
 
-    # Računanje delte
-    # Trenutne metrike su već u state-u (učitane u langraph_test.py)
+    # Racunanje delte
+    # Trenutne metrike su vec u state-u (ucitane u langraph_test.py)
     current_as_dict = {
         "mcc_score":             state["mcc_score"],
         "classification_report": state["classification_report"],
-        "summary":               {},   # langraph_test prosleđuje summary ako postoji
+        "summary":               {},   # langraph_test prosledjuje summary ako postoji
     }
     delta, regression = _compute_delta(current_as_dict, previous)
 
-    # Log najvažnijih promena
+    # Log najvaznijih promena
     if previous and delta.get("mcc_delta") is not None:
         sign = "▲" if delta["mcc_delta"] >= 0 else "▼"
         logger.info(
@@ -236,7 +264,7 @@ async def node_analyze_per_class(state: MetricsState) -> dict:
         state["mcc_score"],
     )
 
-    # Dodajemo delta kontekst u prompt ako postoji poređenje sa prethodnim runom
+    # Dodajemo delta kontekst u prompt ako postoji poredjenje sa prethodnim runom
     delta     = state.get("metrics_delta", {})
     has_delta = delta.get("mcc_delta") is not None
 
@@ -447,32 +475,157 @@ async def node_synthesize_recommendations(state: MetricsState) -> dict:
     }
 
 
+def node_decision(state: MetricsState) -> dict:
+    """
+    Deterministicki odlucuje o sledecem koraku na osnovu metrika.
+    Ne poziva Ollamu — cista Python logika sa fiksnim pragovima.
+
+    Pravila:
+        MCC < DECISION_RETRAIN_MCC                     => RETRAIN
+        MCC < DECISION_SCAN_MCC ili regression_detected => SCAN_FIRST
+        inace                                           => SUGGEST_ONLY
+    """
+    logger.info("[LangGraph] node_decision: start")
+
+    mcc        = state["mcc_score"]
+    regression = state.get("regression_detected", False)
+
+    if mcc < DECISION_RETRAIN_MCC:
+        decision = "RETRAIN"
+    elif mcc < DECISION_SCAN_MCC or regression:
+        decision = "SCAN_FIRST"
+    else:
+        decision = "SUGGEST_ONLY"
+
+    logger.info(
+        f"[LangGraph] node_decision: MCC={mcc:.4f} | "
+        f"regression={regression} | decision={decision}"
+    )
+
+    return {"decision": decision}
+
+
+def _route_after_decision(state: MetricsState) -> str:
+    """
+    Routing funkcija za conditional edge posle node_decision.
+    Vraca naziv sledeceg cvora kao string.
+    """
+    return state["decision"]
+
+
+def _find_file_recursive(filename: str, root: Path) -> Path | None:
+    """
+    Rekurzivno trazi fajl po imenu unutar root direktorijuma.
+    Preskace foldere definisane u SCAN_SKIP_DIRS.
+    Vraca prvu pronadjenu putanju ili None ako fajl ne postoji.
+    """
+    for path in root.rglob(filename):
+        # Proverava da li je bilo koji deo putanje u skip listi
+        if any(part in SCAN_SKIP_DIRS for part in path.parts):
+            continue
+        return path
+    return None
+
+# Trebaces da dodas da skenira slike! iz graphs foldera!
+async def node_scan_codebase(state: MetricsState) -> dict:
+    """
+    Rekurzivno skenira relevantne fajlove iz root direktorijuma projekta.
+    Koje fajlove cita odredjuje se na osnovu slabih klasa iz prethodne analize.
+
+    Uvek cita: hyperparam.py, config.py
+    Po slaboj klasi: attacks.py, dataset_generator.py, windowing.py, normal.py
+
+    Preskace foldere: __pycache__, venv, .venv, .git, .idea
+    Sadrzaj se skracuje na SCAN_MAX_CHARS_PER_FILE da ne bi prekoracio
+    kontekst prozor Ollame.
+
+    Popunjava: scanned_files
+    """
+    logger.info("[LangGraph] node_scan_codebase: start")
+
+    # Odredjivanje koje fajlove treba skenirati
+    files_to_scan: set[str] = set(ALWAYS_SCAN)
+    for cls in state.get("weak_classes", []):
+        files_to_scan.update(CLASS_TO_FILES.get(cls, []))
+
+    logger.info(f"  Target files: {sorted(files_to_scan)}")
+    logger.info(f"  Skipping dirs: {SCAN_SKIP_DIRS}")
+
+    scanned: dict[str, str] = {}
+    root = Path(".")
+
+    for filename in sorted(files_to_scan):
+        filepath = _find_file_recursive(filename, root)
+
+        if filepath is None:
+            logger.warning(f"  Not found anywhere in project: {filename}")
+            scanned[filename] = f"[FILE NOT FOUND: {filename}]"
+            continue
+
+        try:
+            content = filepath.read_text(encoding="utf-8")
+            # Skracivanje ako je fajl prevelik
+            if len(content) > SCAN_MAX_CHARS_PER_FILE:
+                content = (
+                    content[:SCAN_MAX_CHARS_PER_FILE]
+                    + f"\n... [truncated — {len(content)} total chars]"
+                )
+            # Kljuc ukljucuje relativnu putanju radi jasnoce (npr. "api/config.py")
+            rel_key = str(filepath.relative_to(root))
+            scanned[rel_key] = content
+            logger.info(f"  Read {rel_key}: {len(content)} chars")
+        except Exception as e:
+            logger.warning(f"  Could not read {filepath}: {e}")
+            scanned[filename] = f"[READ ERROR: {e}]"
+
+    logger.info(f"[LangGraph] node_scan_codebase: done | {len(scanned)} files scanned")
+
+    return {"scanned_files": scanned}
+
+
 def build_analyzer_graph():
     """
     Kreira i kompajlira LangGraph graf za analizu metrika.
 
-    Trenutni tok (Korak 1):
-        load_and_compare → analyze_per_class → analyze_confusion → synthesize → END
-
-    Buduci tok (Koraci 2-4):
-        load_and_compare → analyze_per_class → analyze_confusion → synthesize
-            → decision (conditional edges)
-                ├── SUGGEST_ONLY → END
-                ├── SCAN_FIRST   → scan_codebase → propose_hyperparams → human_confirm → [END | retrain]
-                └── RETRAIN      → propose_hyperparams → human_confirm → [END | retrain]
+    Trenutni tok (Korak 2):
+        load_and_compare => analyze_per_class => analyze_confusion => synthesize
+            => decision
+                ├── SUGGEST_ONLY => END
+                ├── SCAN_FIRST   => scan_codebase => [propose_hyperparams => human_confirm => retrain] (Korak 3+)
+                └── RETRAIN      => [propose_hyperparams => human_confirm => retrain] (Korak 3+)
     """
     graph = StateGraph(MetricsState)
 
+    # Postojeci cvorovi
     graph.add_node("load_and_compare",  node_load_and_compare_metrics)
     graph.add_node("analyze_per_class", node_analyze_per_class)
     graph.add_node("analyze_confusion", node_analyze_confusion)
     graph.add_node("synthesize",        node_synthesize_recommendations)
 
+    # Novi cvorovi (Korak 2)
+    graph.add_node("decision",          node_decision)
+    graph.add_node("scan_codebase",     node_scan_codebase)
+
+    # Sekvencijalne grane
     graph.set_entry_point("load_and_compare")
     graph.add_edge("load_and_compare",  "analyze_per_class")
     graph.add_edge("analyze_per_class", "analyze_confusion")
     graph.add_edge("analyze_confusion", "synthesize")
-    graph.add_edge("synthesize",        END)
+    graph.add_edge("synthesize",        "decision")
+
+    # Conditional edges posle decision
+    graph.add_conditional_edges(
+        "decision",
+        _route_after_decision,
+        {
+            "SUGGEST_ONLY": END,
+            "SCAN_FIRST":   "scan_codebase",
+            "RETRAIN":      END,            # privremeno END dok se ne doda Korak 3
+        },
+    )
+
+    # scan_codebase trenutno zavrsava na END (Korak 3 dodaje propose_hyperparams)
+    graph.add_edge("scan_codebase", END)
 
     return graph.compile()
 
