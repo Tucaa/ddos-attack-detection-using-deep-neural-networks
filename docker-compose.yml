@@ -7,24 +7,41 @@ services:
   llama-engine:
     image: ollama/ollama:latest
     container_name: llama-engine
-
     ports:
       - "11434:11434"
-
     volumes:
       - ollama_data:/root/.ollama
-
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
-    # Healthcheck — ceka dok Ollama API stvarno ne postane dostupan
+    # ✅ Koristi ollama CLI umesto curl
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 30s
+    # image: ollama/ollama:latest
+    # container_name: llama-engine
+
+    # ports:
+    #   - "11434:11434"
+
+    # volumes:
+    #   - ollama_data:/root/.ollama
+
+    # environment:
+    #   - NVIDIA_VISIBLE_DEVICES=all
+    #   - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+    # # Healthcheck — ceka dok Ollama API stvarno ne postane dostupan
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+    #   interval: 10s
+    #   timeout: 5s
+    #   retries: 10
+    #   start_period: 30s
 
     deploy:
       resources:

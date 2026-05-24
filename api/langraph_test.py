@@ -25,19 +25,24 @@ def get_user_input():
 
 
 # Pomocne funkcije za ispis
-def _separator(char="=", width=65):
+def separator(char="=", width=65):
     print(char * width)
 
-def _section(title: str):
+def section(title: str):
     print()
-    _separator()
+    separator()
     print(f"  {title}")
-    _separator()
+    separator()
 
-def _print_list(items: list[str], indent: int = 4):
+def print_list(items: list, indent: int = 4):
+    # Konvertuje stavke u string ako LLM vrati dict umesto plain teksta
     for i, item in enumerate(items, 1):
+        if isinstance(item, dict):
+            text = item.get("recommendation") or item.get("text") or item.get("description") or str(item)
+        else:
+            text = str(item)
         prefix = " " * indent + f"{i}."
-        words = item.split()
+        words = text.split()
         line, lines = [], []
         for word in words:
             if len(" ".join(line + [word])) > 90:
@@ -51,9 +56,9 @@ def _print_list(items: list[str], indent: int = 4):
         for continuation in lines[1:]:
             print(" " * (indent + 4) + continuation)
 
-def _print_results(state: dict):
+def print_results(state: dict):
     """Stampa rezultate LangGraph analize u citljivom formatu."""
-    _section("LANGGRAPH ANALYSIS RESULTS")
+    section("LANGGRAPH ANALYSIS RESULTS")
 
     # Delta metrike vs prethodni run
     delta = state.get("metrics_delta", {})
@@ -93,51 +98,68 @@ def _print_results(state: dict):
         print("    No weak classes identified.")
 
     # Per-class analiza
-    _section("PER-CLASS ANALYSIS")
+    section("PER-CLASS ANALYSIS")
     print(state.get("per_class_analysis", "(empty)"))
 
     # Confusion matrix analiza
-    _section("CONFUSION MATRIX ANALYSIS")
+    section("CONFUSION MATRIX ANALYSIS")
     print(state.get("confusion_analysis", "(empty)"))
 
     # Preporuke
     recs = state.get("recommendations", {})
 
-    _section("RECOMMENDATIONS — Data generation")
-    _print_list(recs.get("data_generation", []))
+    section("RECOMMENDATIONS — Data generation")
+    print_list(recs.get("data_generation", []))
 
-    _section("RECOMMENDATIONS — Model architecture/hyperparameters")
-    _print_list(recs.get("model", []))
+    section("RECOMMENDATIONS — Model architecture/hyperparameters")
+    print_list(recs.get("model", []))
 
-    _section("RECOMMENDATIONS — Training strategy")
-    _print_list(recs.get("training", []))
+    section("RECOMMENDATIONS — Training strategy")
+    print_list(recs.get("training", []))
 
-    _section("CONCLUSION")
-    print(state.get("summary", "(empty)"))
-
-    # Decision rezultat
+    # Decision rezultat — pre zaključka jer postavlja kontekst
     decision = state.get("decision", "")
     if decision:
-        _section("DECISION")
+        section("DECISION")
         labels = {
             "SUGGEST_ONLY": "Suggestions only — model performance is acceptable.",
             "SCAN_FIRST":   "Codebase scanned — review proposed changes before retraining.",
             "RETRAIN":      "Retraining recommended — MCC below critical threshold.",
         }
-        print(f" => {decision}: {labels.get(decision, '')}")
+        print(f"  => {decision}: {labels.get(decision, '')}")
 
-    # Skenirani fajlovi (samo nazivi i velicina, ne sadrzaj)
-    scanned = state.get("scanned_files", {})
+    # Predloženi hyperparametri
+    proposed = state.get("proposed_hyperparams", {})
+    if proposed:
+        section("PROPOSED HYPERPARAMETERS")
+        reasoning = proposed.get("_reasoning", "")
+        if reasoning:
+            print(f"  Reasoning: {reasoning}\n")
+        for param, value in proposed.items():
+            if param == "_reasoning":
+                continue
+            print(f"    {param:<20} {value}")
+
+    scanned = state.get("scanned_files", {})  
     if scanned:
         print(f"\n  Scanned files ({len(scanned)}):")
         for fname, content in scanned.items():
             if content.startswith("["):
-                print(f"    [ERROR] {fname}")
+                print(f"[ERROR] {fname}")
             else:
-                print(f"    [OK]    {fname}  ({len(content)} chars)")
+                print(f"[OK] {fname}  ({len(content)} chars)")
+
+    section("CONCLUSION")
+    print(state.get("summary", "(empty)"))
+
+    # Retrain status
+    if state.get("retrain_triggered"):
+        print(f"\n  Retrain started | command: {state.get('retrain_command', '')}")
+    elif state.get("human_confirmed") is False and state.get("proposed_hyperparams"):
+        print("\n  Retrain skipped — user declined.")
 
     print()
-    _separator()
+    separator()
 
 
 # Provera Ollama dostupnosti
@@ -178,16 +200,16 @@ async def run_test(metrics_path: str, ollama_url: str):
     ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
     print()
-    _separator()
+    separator()
     print("  DDoS LSTM — LangGraph Analyzer Test")
-    _separator()
+    separator()
 
     # Provera Ollama
     print("\n[1/4] Checking Ollama...")
     ollama_ok = await check_ollama(ollama_host)
     if not ollama_ok:
         print(f"\n  Hint: If Ollama is in Docker, try running again and type:")
-        print(f"    http://ollama:11434 ili http://localhost:11434")
+        print(f"    http://ollama:11434 or http://localhost:11434")
         sys.exit(1)
 
     # Ucitavanje metrika
@@ -211,7 +233,7 @@ async def run_test(metrics_path: str, ollama_url: str):
 
     # Pravljenje inicijalnog stanja
     print("\n[3/4] Running LangGraph graph...")
-    print("  Nodes: load_and_compare=> analyze_per_class=> analyze_confusion=> synthesize=> decision=> [scan_codebase]")
+    print("  Nodes: load_and_compare => analyze_per_class => analyze_confusion => synthesize => decision => [scan_codebase] => propose_hyperparams => human_confirm => [trigger_retrain]")
     print("  (Ollama nodes may take 30-90s)\n")
 
     initial_state = {
@@ -264,7 +286,7 @@ async def run_test(metrics_path: str, ollama_url: str):
 
     # Rezultati
     print(f"[4/4] Graph finished in {elapsed:.1f}s")
-    _print_results(final_state)
+    print_results(final_state)
 
     # Cuvanje rezultata
     output_path = Path(metrics_path).parent / "langgraph_analysis.json"
@@ -275,6 +297,10 @@ async def run_test(metrics_path: str, ollama_url: str):
         "confusion_analysis": final_state["confusion_analysis"],
         "recommendations":    final_state["recommendations"],
         "summary":            final_state["summary"],
+        # Decision i skeniranje
+        "decision":             final_state.get("decision", ""),
+        "scanned_files":        list(final_state.get("scanned_files", {}).keys()),
+        "proposed_hyperparams": final_state.get("proposed_hyperparams", {}),
         # Delta vs prethodni run
         "metrics_delta":      final_state.get("metrics_delta", {}),
         "regression_detected": final_state.get("regression_detected", False),

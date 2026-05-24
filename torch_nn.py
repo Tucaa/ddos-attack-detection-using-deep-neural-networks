@@ -30,6 +30,7 @@ DROPOUT       = 0.3
 LEARNING_RATE = 1e-3
 EPOCHS        = 20
 N_SPLITS      = 5   # Broj foldova za TimeSeriesSplit
+MODEL_NAME = 'ddos_lstm_attention.pt'
 
 
 
@@ -607,7 +608,7 @@ def train_fold(model, train_loader, val_loader,criterion, optimizer, scheduler,d
     return best_metrics
 
 
-def cross_validate(csv_path: str, save_path: str = "ddos_lstm_attention.pt"):
+def cross_validate(csv_path: str, save_path: str = MODEL_NAME):
     """
     TimeSeriesSplit cross-validacija sa LSTM + Attention modelom.
     Svaki fold cuva hronoloski redosled - nema data leakage-a.

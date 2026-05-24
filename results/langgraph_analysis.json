@@ -1,29 +1,45 @@
 {
   "weak_classes": [
-    "udp_flood_mixed",
     "subnet_carpet_bombing",
+    "udp_flood_mixed",
     "ack_flood"
   ],
-  "per_class_analysis": "The LSTM model underperforms in classes with overlapping traffic patterns, such as udp_flood_mixed and udp_flood_large. Additionally, the model has difficulties distinguishing subnet_carpet_bombing from other attack types due to similarities in packet sizes. Ack_flood also suffers from limited diversity in synthetic data generation, leading to poor classification results.",
-  "confusion_analysis": "The model exhibits a tendency to confuse 'udp_flood_large' with 'subnet_carpet_bombing', possibly due to the similarity in their traffic signatures. Conversely, it often misclassifies 'normal' as 'udp_flood_mixed', suggesting that the model struggles to distinguish between benign and malicious UDP traffic. The confusion of 'ntp_amplification' with 'ack_flood' may indicate a systematic bias towards over-predicting certain types of attacks. Furthermore, the model seems to have difficulties distinguishing between various flood-based attacks, such as 'syn_flood', 'icmp_flood', and 'udp_flood_mixed'.",
+  "per_class_analysis": "The classes subnet_carpet_bombing and udp_flood_mixed exhibit low precision, suggesting that the model is prone to false positives. This may be due to feature overlap with other attack types, such as similar packet size distributions between udp_flood_large and udp_flood_mixed. Additionally, class imbalance and insufficient diversity in synthetic data generation could contribute to these underperformances. The ack_flood class also shows a low f1-score and recall, which might indicate issues related to distinguishing between different types of flood attacks.",
+  "confusion_analysis": "The model struggles to distinguish between subnet_carpet_bombing and udp_flood_mixed, often misclassifying the former as the latter. This may be due to similar traffic signatures in these two classes. The model also tends to over-predict 'normal' traffic, mistaking it for other types of attacks, particularly subnet_carpet_bombing and ack_flood. This could indicate a lack of sufficient discrimination in the LSTM's learned representations.",
   "recommendations": {
     "data_generation": [
-      "Increase minority class oversampling ratio to 1.5 for udp_flood_mixed and subnet_carpet_bombing classes",
-      "Adjust noise std per feature: decrease packet_size variance by 20% and increase bytes_per_second variance by 15%",
-      "Modify transition blending window to 30 samples with a 50/50 blend ratio for better representation of attack patterns"
+      "Increase diversity in synthetic data generation by introducing more attack types with unique traffic signatures.",
+      "Adjust noise std per feature to better match real-world packet size distributions and inter-arrival times.",
+      "Modify transition blending window to a longer duration (e.g., 30 seconds) to capture more gradual attack onset phases.",
+      "Add feature correlations specific to subnet_carpet_bombing attacks, such as correlations between packet_size, packets_per_second, and unique_src_ips."
     ],
     "model": [
-      "Increase hidden size of LSTM layers from 128 to 256 for better feature extraction",
-      "Add bidirectional LSTM to capture both forward and backward dependencies in time series data",
-      "Adjust dropout rate from 0.2 to 0.1 to reduce overfitting on attack-specific patterns"
+      "Increase hidden_size from 128 to 256 for better learning capacity and representation power of the LSTM model.",
+      "Add bidirectional LSTMs to capture both forward and backward dependencies in traffic sequences.",
+      "Adjust dropout rate from 0.2 to 0.1 to reduce overfitting and improve generalization on unseen data."
     ],
     "training": [
-      "Use Focal Loss instead of CrossEntropyLoss to give more importance to rare classes (udp_flood_mixed, subnet_carpet_bombing)",
-      "Implement mixup augmentation with a 20% probability to generate synthetic samples that are linear combinations of original inputs",
-      "Increase early stopping patience from 10 to 15 epochs for more robust convergence"
+      "Use focal loss instead of CrossEntropyLoss to mitigate the effect of class imbalance and focus on hard-to-classify samples.",
+      "Apply mixup augmentation by randomly mixing input traffic sequences with their perturbed versions to enhance robustness and generalization."
     ]
   },
-  "summary": "The current LSTM model achieves an overall MCC of 0.7841, but struggles with distinguishing between specific attack types (udp_flood_mixed, subnet_carpet_bombing) and misclassifying benign traffic as malicious. To address this, increasing minority class oversampling ratio and adjusting noise std per feature are the top recommendations.",
+  "summary": "The current model exhibits a high MCC score (0.7841) but struggles with false positives in subnet_carpet_bombing and udp_flood_mixed attacks. To address these issues, we recommend increasing diversity in synthetic data generation and adjusting the LSTM architecture to better capture unique traffic signatures.",
+  "decision": "SCAN_FIRST",
+  "scanned_files": [
+    "attacks.py",
+    "api\\config.py",
+    "dataset_generator.py",
+    "hyperparam.py",
+    "windowing.py"
+  ],
+  "proposed_hyperparams": {
+    "hidden_size": 256,
+    "num_layers": 2,
+    "dropout": 0.25,
+    "learning_rate": 0.001,
+    "seq_len": 30,
+    "_reasoning": "To address the low precision in subnet_carpet_bombing and udp_flood_mixed, we increased the hidden size to 256, allowing the model to capture more complex patterns. We also set num_layers to 2 to enable the model to learn from multiple time steps. A moderate dropout rate of 0.25 helps prevent overfitting, while a learning rate of 0.001 allows for smooth convergence."
+  },
   "metrics_delta": {
     "mcc_delta": 0.0,
     "macro_f1_delta": null,
@@ -40,6 +56,6 @@
     }
   },
   "regression_detected": false,
-  "elapsed_seconds": 55.2,
+  "elapsed_seconds": 72.43,
   "source_metrics": "results/test_metrics.json"
 }
