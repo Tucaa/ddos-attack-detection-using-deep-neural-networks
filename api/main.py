@@ -2,13 +2,13 @@ import io
 import logging
 import pandas as pd
 from contextlib import asynccontextmanager
-
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.config import WINDOW_SIZE, NUM_FEATURES, FEATURE_NAMES, CLASS_LABELS
 from api.model import model_wrapper
-from api.ollama_client import generate_attack_scenario, generate_attack_analysis
+from api.ollama_client import generate_attack_scenario, generate_attack_analysis, generate_attack_descriptions
 from api.schemas import (
     PredictRequest, PredictResponse,
     FileInferenceResponse, WindowPrediction,
@@ -27,6 +27,10 @@ VALID_ATTACK_TYPES = {
     "syn_flood", "icmp_flood", "udp_flood_mixed",
     "ntp_amplification", "ack_flood", "normal",
 }
+
+# Kes za opis napada
+_attack_descriptions_cache: dict | None = None
+
 
 
 @asynccontextmanager
@@ -205,3 +209,43 @@ async def simulate(request: SimulateRequest):
         class_probabilities=prediction["class_probabilities"],
         analysis=AttackAnalysis(**analysis_data),
     )
+
+
+@app.get("/attacks/info", tags=["Meta"])
+async def attacks_info():
+    """
+    Vraća tehničke opise svih tipova napada sa kojima je model treniran.
+    Opisi se generišu kroz Ollamu pri prvom pozivu i keširaju za naredne.
+    """
+    global _attack_descriptions_cache
+
+    if _attack_descriptions_cache is not None:
+        return _attack_descriptions_cache
+
+    # Pronađi i učitaj attacks.py
+    attacks_path = Path("attacks.py")
+    if not attacks_path.exists():
+        # Pokušaj jedan nivo gore (u slučaju da se API pokreće iz api/ foldera)
+        attacks_path = Path("../attacks.py")
+
+    if not attacks_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="attacks.py not found. Make sure it exists in the project root."
+        )
+
+    attacks_source = attacks_path.read_text(encoding="utf-8")
+
+    try:
+        descriptions = await generate_attack_descriptions(attacks_source)
+    except (ValueError, RuntimeError) as e:
+        logger.error(f"[attacks/info] Ollama error: {e}")
+        raise HTTPException(status_code=502, detail=f"Ollama error: {e}")
+
+    _attack_descriptions_cache = {
+        "total": len(descriptions),
+        "attacks": descriptions,
+    }
+
+    logger.info(f"[attacks/info] Generated descriptions for {len(descriptions)} attack types.")
+    return _attack_descriptions_cache

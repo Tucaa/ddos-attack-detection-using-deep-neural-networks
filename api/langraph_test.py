@@ -56,6 +56,20 @@ def print_list(items: list, indent: int = 4):
         for continuation in lines[1:]:
             print(" " * (indent + 4) + continuation)
 
+def print_attack_descriptions(descriptions: dict):
+    """Štampa kratki pregled karakteristika svakog tipa napada."""
+    if not descriptions:
+        print("  (Attack descriptions not available)")
+        return
+
+    for attack_name, info in descriptions.items():
+        print(f"\n  {attack_name}")
+        print(f"  {'─' * 40}")
+        print(f"    {info.get('description', '—')}")
+        chars = info.get("characteristics", [])
+        if chars:
+            print(f"    Key traits: {' | '.join(chars)}")
+
 def print_results(state: dict):
     """Stampa rezultate LangGraph analize u citljivom formatu."""
     section("LANGGRAPH ANALYSIS RESULTS")
@@ -96,6 +110,10 @@ def print_results(state: dict):
             print(f"    ! {cls}")
     else:
         print("    No weak classes identified.")
+
+    # Sekcija za opis napada
+    section("ATTACK TYPES — CHARACTERISTICS SUMMARY")
+    print_attack_descriptions(state.get("attack_descriptions", {}))
 
     # Per-class analiza
     section("PER-CLASS ANALYSIS")
@@ -182,6 +200,7 @@ async def check_ollama(host: str):
         return False
 
 
+
 # Glavni test
 async def run_test(metrics_path: str, ollama_url: str):
     # Postavljamo Ollama host pre importa ollama_client-a ako je korisnik uneo vrednost
@@ -191,7 +210,7 @@ async def run_test(metrics_path: str, ollama_url: str):
 
     # Import grafa
     try:
-        from langraph import analyzer_graph
+        from langraph import analyzer_graph, node_human_confirm, node_trigger_retrain
     except ImportError as e:
         print(f"Import error: {e}")
         print("Run the script from the root directory of the project (where the api/ folder is located).")
@@ -233,7 +252,7 @@ async def run_test(metrics_path: str, ollama_url: str):
 
     # Pravljenje inicijalnog stanja
     print("\n[3/4] Running LangGraph graph...")
-    print("  Nodes: load_and_compare => analyze_per_class => analyze_confusion => synthesize => decision => [scan_codebase] => propose_hyperparams => human_confirm => [trigger_retrain]")
+    print("  Nodes: load_and_compare => load_attack_descriptions => analyze_per_class => analyze_confusion => synthesize => decision => [scan_codebase] => propose_hyperparams")
     print("  (Ollama nodes may take 30-90s)\n")
 
     initial_state = {
@@ -252,6 +271,7 @@ async def run_test(metrics_path: str, ollama_url: str):
         # Medjurezultati analize
         "per_class_analysis":  "",
         "confusion_analysis":  "",
+        "attack_descriptions": {},   # puni node_load_attack_descriptions
 
         # Izlaz analize
         "weak_classes":    [],
@@ -265,6 +285,8 @@ async def run_test(metrics_path: str, ollama_url: str):
         "human_confirmed":      False,
         "retrain_triggered":    False,
         "retrain_command":      "",
+        "dataset_path":         "output/1d.csv",
+        "model_name":           "",
     }
 
     t_start = time.time()
@@ -284,9 +306,25 @@ async def run_test(metrics_path: str, ollama_url: str):
     shutil.copy(p, prev_path)
     print(f"  Metrics backed up for next run -> {prev_path}")
 
-    # Rezultati
     print(f"[4/4] Graph finished in {elapsed:.1f}s")
+
+    # Prvo prikaz svih rezultata...
     print_results(final_state)
+
+    # ...tek onda confirmation (human_confirm i trigger_retrain su van grafa)
+    if final_state.get("proposed_hyperparams"):
+        confirm_state = await node_human_confirm(final_state)
+        final_state.update(confirm_state)
+
+        if final_state.get("human_confirmed"):
+            retrain_state = await node_trigger_retrain(final_state)
+            final_state.update(retrain_state)
+
+    # Retrain status
+    if final_state.get("retrain_triggered"):
+        print(f"\n  Retrain started | command: {final_state.get('retrain_command', '')}")
+    elif final_state.get("human_confirmed") is False and final_state.get("proposed_hyperparams"):
+        print("\n  Retrain skipped — user declined.")
 
     # Cuvanje rezultata
     output_path = Path(metrics_path).parent / "langgraph_analysis.json"
@@ -304,6 +342,9 @@ async def run_test(metrics_path: str, ollama_url: str):
         # Delta vs prethodni run
         "metrics_delta":      final_state.get("metrics_delta", {}),
         "regression_detected": final_state.get("regression_detected", False),
+        # Retrain info
+        "retrain_triggered":  final_state.get("retrain_triggered", False),
+        "model_name":         final_state.get("model_name", ""),
         # Meta
         "elapsed_seconds":    round(elapsed, 2),
         "source_metrics":     str(metrics_path),
@@ -311,6 +352,140 @@ async def run_test(metrics_path: str, ollama_url: str):
     with open(output_path, "w") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
     print(f"  Analysis saved -> {output_path}")
+
+# Stara implementacija
+# async def run_test(metrics_path: str, ollama_url: str):
+#     # Postavljamo Ollama host pre importa ollama_client-a ako je korisnik uneo vrednost
+#     if ollama_url:
+#         os.environ["OLLAMA_HOST"] = ollama_url
+#         print(f"Ollama host override: {ollama_url}")
+
+#     # Import grafa
+#     try:
+#         from langraph import analyzer_graph
+#     except ImportError as e:
+#         print(f"Import error: {e}")
+#         print("Run the script from the root directory of the project (where the api/ folder is located).")
+#         sys.exit(1)
+
+#     ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
+#     print()
+#     separator()
+#     print("  DDoS LSTM — LangGraph Analyzer Test")
+#     separator()
+
+#     # Provera Ollama
+#     print("\n[1/4] Checking Ollama...")
+#     ollama_ok = await check_ollama(ollama_host)
+#     if not ollama_ok:
+#         print(f"\n  Hint: If Ollama is in Docker, try running again and type:")
+#         print(f"    http://ollama:11434 or http://localhost:11434")
+#         sys.exit(1)
+
+#     # Ucitavanje metrika
+#     print(f"\n[2/4] Loading metrics from: {metrics_path}")
+#     p = Path(metrics_path)
+#     if not p.exists():
+#         print(f"  File not found: {metrics_path}")
+#         print("  Generate it by running the training script, or use test_metrics.json")
+#         sys.exit(1)
+
+#     with open(p, "r") as f:
+#         metrics = json.load(f)
+
+#     print(f"  MCC score:     {metrics['mcc_score']:.4f}")
+#     print(f"  Classes:          {len(metrics['class_labels'])}")
+#     print(f"  Timestamp:     {metrics.get('timestamp', 'N/A')}")
+#     if "summary" in metrics:
+#         s = metrics["summary"]
+#         print(f"  Macro F1:       {s.get('macro_f1', 0):.4f}")
+#         print(f"  Total samples: {s.get('total_samples', 0):,}")
+
+#     # Pravljenje inicijalnog stanja
+#     print("\n[3/4] Running LangGraph graph...")
+#     print("  Nodes: load_and_compare => load_attack_descriptions => analyze_per_class => analyze_confusion => synthesize => decision => [scan_codebase] => propose_hyperparams => human_confirm => [trigger_retrain]")
+#     print("  (Ollama nodes may take 30-90s)\n")
+
+#     initial_state = {
+#         # Ulazne metrike (trenutni run)
+#         "classification_report": metrics["classification_report"],
+#         "confusion_matrix":      metrics["confusion_matrix"],
+#         "mcc_score":             metrics["mcc_score"],
+#         "roc_auc_scores":        metrics["roc_auc_scores"],
+#         "class_labels":          metrics["class_labels"],
+
+#         # Poređenje — puni ih node_load_and_compare_metrics
+#         "previous_metrics":    {},
+#         "metrics_delta":       {},
+#         "regression_detected": False,
+
+#         # Medjurezultati analize
+#         "per_class_analysis":  "",
+#         "confusion_analysis":  "",
+
+#         # Izlaz analize
+#         "weak_classes":    [],
+#         "recommendations": {},
+#         "summary":         "",
+
+#         # Decision i akcija — popunjavaju se u kasnijim koracima
+#         "decision":             "",
+#         "scanned_files":        {},
+#         "proposed_hyperparams": {},
+#         "human_confirmed":      False,
+#         "retrain_triggered":    False,
+#         "retrain_command":      "",
+#         # Ovde ce trebati da se dinamicki uradi u buducnosti!
+#         "dataset_path": "output/1d.csv",
+#         "attack_descriptions":  {},
+
+#     }
+
+#     t_start = time.time()
+#     try:
+#         final_state = await analyzer_graph.ainvoke(initial_state)
+#     except Exception as e:
+#         print(f"  ERROR in graph: {e}")
+#         import traceback
+#         traceback.print_exc()
+#         sys.exit(1)
+
+#     elapsed = time.time() - t_start
+
+#     # Backup trenutnih metrika u _prev — radi se POSLE uspesnog run-a
+#     # kako bi sledeci run imao tacne prethodne metrike za poredenje
+#     prev_path = p.parent / "test_metrics_prev.json"
+#     shutil.copy(p, prev_path)
+#     print(f"  Metrics backed up for next run -> {prev_path}")
+
+#     # Rezultati
+#     print(f"[4/4] Graph finished in {elapsed:.1f}s")
+#     print_results(final_state)
+
+#     # Cuvanje rezultata
+#     output_path = Path(metrics_path).parent / "langgraph_analysis.json"
+#     output = {
+#         # Analiza
+#         "weak_classes":       final_state["weak_classes"],
+#         "per_class_analysis": final_state["per_class_analysis"],
+#         "confusion_analysis": final_state["confusion_analysis"],
+#         "recommendations":    final_state["recommendations"],
+#         "summary":            final_state["summary"],
+#         # Decision i skeniranje
+#         "decision":             final_state.get("decision", ""),
+#         "scanned_files":        list(final_state.get("scanned_files", {}).keys()),
+#         "proposed_hyperparams": final_state.get("proposed_hyperparams", {}),
+#         # Delta vs prethodni run
+#         "metrics_delta":      final_state.get("metrics_delta", {}),
+#         "regression_detected": final_state.get("regression_detected", False),
+#         # Meta
+#         "elapsed_seconds":    round(elapsed, 2),
+#         "source_metrics":     str(metrics_path),
+#     }
+#     with open(output_path, "w") as f:
+#         json.dump(output, f, indent=2, ensure_ascii=False)
+#     print(f"  Analysis saved -> {output_path}")
 
 
 if __name__ == "__main__":

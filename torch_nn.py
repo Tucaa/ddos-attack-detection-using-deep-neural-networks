@@ -823,11 +823,15 @@ def cross_validate(csv_path: str, save_path: str = MODEL_NAME):
 
 
 if __name__ == "__main__":
-    # Kasnije ovde razradi input, da postoji vise razlicitih modela koji
-    # Se mogu trenirati pa u zavisnosti od userovog inputa trenirati razlicite modele
-    path = input('Insert csf file path: ').strip()
-    # train(path)
-    cross_validate(path)
+    import sys
+    # Morao sam ovo da dodam zbog pozivanja iz subprocesa
+    if len(sys.argv) > 1:
+        path = sys.argv[1]
+    else:
+        path = input('Insert csv file path: ').strip()
+
+    save_path = sys.argv[2] if len(sys.argv) > 2 else MODEL_NAME
+    cross_validate(path, save_path)
 
     # loaded = torch.load('ddos_lstm.pt')
     # data = prepare_data(path)

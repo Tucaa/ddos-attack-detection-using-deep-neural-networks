@@ -11,6 +11,19 @@ logger = logging.getLogger(__name__)
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 TIMEOUT = 120.0
 
+# Shared client — kreira se jednom, živi dok god proces živi
+_http_client: httpx.AsyncClient | None = None
+
+# Cache za model ime — čita se jednom pri prvom pozivu
+_cached_model: str | None = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(timeout=TIMEOUT)
+    return _http_client
+
 
 def _extract_json(raw: str) -> str:
     """
@@ -29,57 +42,107 @@ async def _get_active_model(client: httpx.AsyncClient) -> str:
     Prvo gleda ENV varijablu, zatim proverava sta je dostupno
     na Ollama serveru, a ako sve otkaze, koristi 'llama3.1:8b' kao fallback.
     """
-    # Ako je model eksplicitno prosledjen kroz ENV, koristi njega
+    global _cached_model
+    if _cached_model:
+        return _cached_model
+
     env_model = os.getenv("OLLAMA_MODEL")
     if env_model:
-        return env_model
+        _cached_model = env_model
+        return _cached_model
 
-    # Ako nije, pitaj Ollama server sta ima od modela na raspolaganju
     try:
         response = await client.get(f"{OLLAMA_HOST}/api/tags", timeout=5.0)
         if response.status_code == 200:
             models = response.json().get("models", [])
             if models:
                 model_names = [m["name"] for m in models]
-                if "llama3.1:8b" in model_names:
-                    return "llama3.1:8b"
-                # U suprotnom, uzmi prvi dostupan model
-                return model_names[0]
+                _cached_model = "llama3.1:8b" if "llama3.1:8b" in model_names else model_names[0]
+                return _cached_model
     except Exception as e:
         logger.warning(f"Could not fetch available models: {e}")
 
-    # Krajnji fallback
-    return "llama3.1:8b"
+    _cached_model = "llama3.1:8b"
+    return _cached_model
+
+
+# async def _get_active_model(client: httpx.AsyncClient) -> str:
+
+#     # Ako je model eksplicitno prosledjen kroz ENV, koristi njega
+#     env_model = os.getenv("OLLAMA_MODEL")
+#     if env_model:
+#         return env_model
+
+#     # Ako nije, pitaj Ollama server sta ima od modela na raspolaganju
+#     try:
+#         response = await client.get(f"{OLLAMA_HOST}/api/tags", timeout=5.0)
+#         if response.status_code == 200:
+#             models = response.json().get("models", [])
+#             if models:
+#                 model_names = [m["name"] for m in models]
+#                 if "llama3.1:8b" in model_names:
+#                     return "llama3.1:8b"
+#                 # U suprotnom, uzmi prvi dostupan model
+#                 return model_names[0]
+#     except Exception as e:
+#         logger.warning(f"Could not fetch available models: {e}")
+
+#     # Krajnji fallback
+#     return "llama3.1:8b"
 
 
 async def ollama_generate(prompt: str, system: str = "") -> str:
-    """
-    Genericki poziv Ollama /api/generate endpointa.
-    Vraca sirovi tekstualni odgovor modela.
-    """
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        # Model se odredjuje dinamicki pri svakom pozivu
-        active_model = await _get_active_model(client)
+#     """
+#     Genericki poziv Ollama /api/generate endpointa.
+#     Vraca sirovi tekstualni odgovor modela.
+#     """
+    client = get_http_client()
+    active_model = await _get_active_model(client)
 
-        payload = {
-            "model": active_model,
-            "prompt": prompt,
-            "system": system,
-            "stream": False,
-        }
+    payload = {
+        "model": active_model,
+        "prompt": prompt,
+        "system": system,
+        "stream": False,
+    }
 
-        try:
-            response = await client.post(
-                f"{OLLAMA_HOST}/api/generate",
-                json=payload,
-            )
-            response.raise_for_status()
-            return response.json().get("response", "")
-        except httpx.HTTPError as e:
-            logger.error(f"Ollama HTTP error for model '{active_model}': {e}")
-            raise RuntimeError(f"Ollama not available: {e}")
+    try:
+        response = await client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
+        response.raise_for_status()
+        return response.json().get("response", "")
+    except httpx.HTTPError as e:
+        logger.error(f"Ollama HTTP error for model '{active_model}': {e}")
+        raise RuntimeError(f"Ollama not available: {e}")
+
+# async def ollama_generate(prompt: str, system: str = "") -> str:
+#     """
+#     Genericki poziv Ollama /api/generate endpointa.
+#     Vraca sirovi tekstualni odgovor modela.
+#     """
+#     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+#         # Model se odredjuje dinamicki pri svakom pozivu
+#         active_model = await _get_active_model(client)
+
+#         payload = {
+#             "model": active_model,
+#             "prompt": prompt,
+#             "system": system,
+#             "stream": False,
+#         }
+
+#         try:
+#             response = await client.post(
+#                 f"{OLLAMA_HOST}/api/generate",
+#                 json=payload,
+#             )
+#             response.raise_for_status()
+#             return response.json().get("response", "")
+#         except httpx.HTTPError as e:
+#             logger.error(f"Ollama HTTP error for model '{active_model}': {e}")
+#             raise RuntimeError(f"Ollama not available: {e}")
 
 
+# Ovo se ne koristi llama tesko generise dobru matricu za napad!
 async def generate_attack_scenario(attack_type: str, window_size: int, feature_names: list[str]) -> list[list[float]]:
     """
     Koristi Ollamu da generise matricu mreznog saobracaja koja simulira
@@ -205,3 +268,41 @@ async def generate_attack_analysis(predicted_class: str,confidence: float,is_att
         "description": result.get("description", ""),
         "mitigation_steps": result.get("mitigation_steps", []),
     }
+
+
+async def generate_attack_descriptions(attacks_source: str) -> dict[str, dict]:
+    """
+    Prima sadržaj attacks.py i vraća rečnik:
+    { "syn_flood": { "description": "...", "characteristics": [...] }, ... }
+    """
+    prompt = f"""Below is the source code of a Python file that defines DDoS attack types used to train a neural network classifier.
+
+{attacks_source}
+
+    For each attack type defined in this file, provide a JSON object where:
+    - Each key is the attack type name (snake_case, exactly as used in the code)
+    - Each value is an object with:
+    - "description": 2-3 sentence technical description of this attack, how it works, and what makes it distinct
+    - "characteristics": list of 3-5 short strings describing key traffic features (e.g. "High UDP packet rate", "Spoofed source IPs")
+
+    Respond ONLY with valid JSON. No markdown, no explanation."""
+
+    system = (
+        "You are a network security expert. "
+        "You analyze DDoS attack implementations and explain them clearly and technically. "
+        "You respond ONLY with valid JSON."
+    )
+
+    raw = await ollama_generate(prompt, system)
+    clean = _extract_json(raw)
+
+    try:
+        result = json.loads(clean)
+    except json.JSONDecodeError as e:
+        logger.error(f"Ollama returned invalid JSON for attack descriptions: {e}\nRaw: {raw[:300]}")
+        raise ValueError(f"Ollama did not return valid JSON: {e}")
+
+    if not isinstance(result, dict):
+        raise ValueError("Expected a JSON object, got something else.")
+
+    return result

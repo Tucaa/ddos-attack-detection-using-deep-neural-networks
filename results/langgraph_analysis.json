@@ -1,61 +1,51 @@
 {
   "weak_classes": [
-    "subnet_carpet_bombing",
-    "udp_flood_mixed",
-    "ack_flood"
+    "dns_amplification",
+    "udp_flood_mixed"
   ],
-  "per_class_analysis": "The classes subnet_carpet_bombing and udp_flood_mixed exhibit low precision, suggesting that the model is prone to false positives. This may be due to feature overlap with other attack types, such as similar packet size distributions between udp_flood_large and udp_flood_mixed. Additionally, class imbalance and insufficient diversity in synthetic data generation could contribute to these underperformances. The ack_flood class also shows a low f1-score and recall, which might indicate issues related to distinguishing between different types of flood attacks.",
-  "confusion_analysis": "The model struggles to distinguish between subnet_carpet_bombing and udp_flood_mixed, often misclassifying the former as the latter. This may be due to similar traffic signatures in these two classes. The model also tends to over-predict 'normal' traffic, mistaking it for other types of attacks, particularly subnet_carpet_bombing and ack_flood. This could indicate a lack of sufficient discrimination in the LSTM's learned representations.",
+  "per_class_analysis": "The LSTM model's underperformance in dns_amplification and udp_flood_mixed can be attributed to similar traffic patterns between attack types, particularly the overlap in packet size distributions. This similarity may cause the model to struggle with distinguishing between these classes, resulting in lower F1-scores and ROC-AUC values compared to other attack types. Additionally, class imbalance and insufficient diversity in synthetic data generation might also contribute to this issue. A comparison with previous runs reveals that both dns_amplification (+0.121) and udp_flood_mixed (+0.352) have shown notable improvements in F1-score, indicating a potential transition period effect where the model is adapting to new attack patterns.",
+  "confusion_analysis": "The model exhibits a tendency to misclassify dns_amplification and udp_flood_mixed traffic as 'normal', likely due to similar traffic signatures and insufficient discrimination in the LSTM's learned representations. This might be attributed to the overlap of feature spaces between these classes, leading to a lack of distinct patterns for each. The model also appears to over-predict 'normal' traffic, contributing to the misclassification patterns observed. It is essential to revisit the model's design, training data, and optimization techniques to mitigate these issues.",
   "recommendations": {
     "data_generation": [
-      "Increase diversity in synthetic data generation by introducing more attack types with unique traffic signatures.",
-      "Adjust noise std per feature to better match real-world packet size distributions and inter-arrival times.",
-      "Modify transition blending window to a longer duration (e.g., 30 seconds) to capture more gradual attack onset phases.",
-      "Add feature correlations specific to subnet_carpet_bombing attacks, such as correlations between packet_size, packets_per_second, and unique_src_ips."
+      "Increase diversity in synthetic data generation by introducing more realistic traffic patterns for dns_amplification and udp_flood_mixed attack types.",
+      "Adjust noise standard deviation per feature to better reflect real-world packet distributions, potentially reducing overlap between attack classes.",
+      "Implement minority class oversampling ratio adjustment based on the observed F1-score improvements during transition periods.",
+      "Add feature correlations specific to attack types (e.g., dns_amplification: higher correlation with protocol = TCP) to enhance discrimination in LSTM's learned representations."
     ],
     "model": [
-      "Increase hidden_size from 128 to 256 for better learning capacity and representation power of the LSTM model.",
-      "Add bidirectional LSTMs to capture both forward and backward dependencies in traffic sequences.",
-      "Adjust dropout rate from 0.2 to 0.1 to reduce overfitting and improve generalization on unseen data."
+      "Consider adding bidirectional LSTMs to capture more complex sequential patterns, potentially improving performance for overlap-heavy classes.",
+      "Adjust the hidden size of the LSTM layers to increase representation capacity and better capture subtle differences between attack types.",
+      "Increase the window size from 20 samples x 12 features to 50-100 samples x 12 features, allowing the model to observe more temporal dependencies in traffic patterns."
     ],
     "training": [
-      "Use focal loss instead of CrossEntropyLoss to mitigate the effect of class imbalance and focus on hard-to-classify samples.",
-      "Apply mixup augmentation by randomly mixing input traffic sequences with their perturbed versions to enhance robustness and generalization."
+      "Experiment with focal loss instead of CrossEntropyLoss for improved handling of class imbalance and overlap between attack classes.",
+      "Implement mixup augmentation on training data to create virtual examples that combine real instances from different attack types, promoting better generalization and discrimination."
     ]
   },
-  "summary": "The current model exhibits a high MCC score (0.7841) but struggles with false positives in subnet_carpet_bombing and udp_flood_mixed attacks. To address these issues, we recommend increasing diversity in synthetic data generation and adjusting the LSTM architecture to better capture unique traffic signatures.",
-  "decision": "SCAN_FIRST",
-  "scanned_files": [
-    "attacks.py",
-    "api\\config.py",
-    "dataset_generator.py",
-    "hyperparam.py",
-    "windowing.py"
-  ],
-  "proposed_hyperparams": {
-    "hidden_size": 256,
-    "num_layers": 2,
-    "dropout": 0.25,
-    "learning_rate": 0.001,
-    "seq_len": 30,
-    "_reasoning": "To address the low precision in subnet_carpet_bombing and udp_flood_mixed, we increased the hidden size to 256, allowing the model to capture more complex patterns. We also set num_layers to 2 to enable the model to learn from multiple time steps. A moderate dropout rate of 0.25 helps prevent overfitting, while a learning rate of 0.001 allows for smooth convergence."
-  },
+  "summary": "The current DDoS LSTM classifier exhibits an MCC of 0.9984 with notable improvements in F1-scores for dns_amplification (+0.121) and udp_flood_mixed (+0.352). The model struggles with distinguishing between similar traffic patterns, particularly for these two classes. The highest-priority improvement action is to revisit the synthetic data generation process, introducing more realistic traffic patterns and adjusting noise standard deviations per feature.",
+  "decision": "SUGGEST_ONLY",
+  "scanned_files": [],
+  "proposed_hyperparams": {},
   "metrics_delta": {
-    "mcc_delta": 0.0,
+    "mcc_delta": 0.2143,
     "macro_f1_delta": null,
     "per_class_f1_delta": {
-      "normal": 0.0,
-      "udp_flood_large": 0.0,
-      "dns_amplification": 0.0,
-      "subnet_carpet_bombing": 0.0,
-      "syn_flood": 0.0,
-      "icmp_flood": 0.0,
-      "udp_flood_mixed": 0.0,
-      "ntp_amplification": 0.0,
-      "ack_flood": 0.0
+      "normal": 0.0192,
+      "udp_flood_large": 0.082,
+      "dns_amplification": 0.1206,
+      "subnet_carpet_bombing": 0.3177,
+      "syn_flood": 0.1222,
+      "icmp_flood": 0.1018,
+      "udp_flood_mixed": 0.352,
+      "ntp_amplification": 0.1514,
+      "ack_flood": 0.2909,
+      "macro avg": 0.9985,
+      "weighted avg": 0.9987
     }
   },
   "regression_detected": false,
-  "elapsed_seconds": 72.43,
-  "source_metrics": "results/test_metrics.json"
+  "retrain_triggered": false,
+  "model_name": "",
+  "elapsed_seconds": 103.13,
+  "source_metrics": "results/eval_metrics.json"
 }

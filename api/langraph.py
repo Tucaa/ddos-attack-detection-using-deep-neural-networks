@@ -29,6 +29,9 @@ DECISION_SCAN_MCC       = 0.85   # MCC ispod ovoga => SCAN_FIRST
 # Uvek se čitaju config.py i hyperparam.py
 ALWAYS_SCAN = ["hyperparam.py", "config.py"]
 
+# U slucaju da korisnik ne unese path, trebace malo elegantnije da se handeluje
+DEFAULT_DATASET_PATH = "output/1d.csv"
+
 # Fajlovi relevantni po klasi slabih performansi
 CLASS_TO_FILES: dict[str, list[str]] = {
     "udp_flood_large":       ["attacks.py", "dataset_generator.py"],
@@ -70,6 +73,7 @@ class MetricsState(TypedDict):
     # --- Medjurezultati analize ---
     per_class_analysis: str
     confusion_analysis: str
+    attack_descriptions: dict
 
     # --- Izlaz analize ---
     weak_classes: list            # nazivi klasa sa losim performansama
@@ -83,6 +87,10 @@ class MetricsState(TypedDict):
     human_confirmed: bool         # da li je korisnik potvrdio retrain
     retrain_triggered: bool       # da li je retrain pokrenut
     retrain_command: str          # komanda koja je izvrsena (za logovanje)
+    dataset_path: str             # putanja do CSV fajla za treniranje
+    model_name: str   # ime izlaznog .pt fajla — setuje node_human_confirm
+
+
 
 
 
@@ -258,6 +266,32 @@ async def node_load_and_compare_metrics(state: MetricsState) -> dict:
     }
 
 
+async def node_load_attack_descriptions(state: MetricsState) -> dict:
+    """
+    Čita attacks.py i koristi Ollamu da generiše tehničke opise svakog tipa napada.
+    Rezultat se koristi kao kontekst u node_analyze_per_class.
+    Popunjava: attack_descriptions
+    """
+    logger.info("[LangGraph] node_load_attack_descriptions: start")
+
+    attacks_path = _find_file_recursive("attacks.py", Path("."))
+    if attacks_path is None:
+        logger.warning("  attacks.py not found — skipping attack descriptions.")
+        return {"attack_descriptions": {}}
+
+    try:
+        source = attacks_path.read_text(encoding="utf-8")
+        from ollama_client import generate_attack_descriptions
+        descriptions = await generate_attack_descriptions(source)
+        logger.info(
+            f"[LangGraph] node_load_attack_descriptions: done | "
+            f"{len(descriptions)} attacks described"
+        )
+        return {"attack_descriptions": descriptions}
+    except Exception as e:
+        logger.warning(f"  Failed to generate attack descriptions: {e}")
+        return {"attack_descriptions": {}}
+
 async def node_analyze_per_class(state: MetricsState) -> dict:
     """
     Analizira precision, recall, f1-score i ROC-AUC po klasi.
@@ -277,6 +311,22 @@ async def node_analyze_per_class(state: MetricsState) -> dict:
     has_delta = delta.get("mcc_delta") is not None
 
     delta_ctx = ""
+    descriptions = state.get("attack_descriptions", {})
+    attack_ctx = ""
+    if descriptions:
+        weak_preview = [
+            cls for cls in state["class_labels"]
+            if descriptions.get(cls)
+        ]
+        if weak_preview:
+            lines = ["ATTACK TYPE DEFINITIONS (from training data generator):"]
+            for cls in weak_preview:
+                info = descriptions[cls]
+                chars = ", ".join(info.get("characteristics", []))
+                lines.append(f"  {cls}:")
+                lines.append(f"    Description: {info.get('description', '')}")
+                lines.append(f"    Key characteristics: {chars}")
+            attack_ctx = "\n".join(lines) + "\n"
     if has_delta:
         sign      = "improved" if delta["mcc_delta"] >= 0 else "regressed"
         delta_ctx = (
@@ -306,6 +356,8 @@ async def node_analyze_per_class(state: MetricsState) -> dict:
     Per-class metrics:
     {metrics_str}
     {delta_ctx}
+    {attack_ctx}
+
     Thresholds for "weak": f1-score < 0.80 OR recall < 0.75 OR roc_auc < 0.85
 
     Respond ONLY with a valid JSON object (no markdown, no explanation outside JSON):
@@ -746,6 +798,15 @@ async def node_propose_hyperparams(state: MetricsState) -> dict:
 
     return {"proposed_hyperparams": validated}
 
+
+# Dodata je helper funkcija za input fajla prilikom ponovnog treniranja modela
+def _prompt_user() -> tuple[bool, str]:
+    answer = input("  Proceed with retraining? [y/N]: ").strip().lower()
+    if answer not in ("y", "yes"):
+        return False, ""
+    path = input(f"  Dataset path [default: {DEFAULT_DATASET_PATH}]: ").strip()
+    return True, path or DEFAULT_DATASET_PATH
+
 async def node_human_confirm(state: MetricsState) -> dict:
     """
     Blokira izvršavanje grafa i čeka potvrdu korisnika u terminalu.
@@ -769,13 +830,17 @@ async def node_human_confirm(state: MetricsState) -> dict:
     print()
 
     loop = asyncio.get_event_loop()
-    answer = await loop.run_in_executor(
-        None,
-        lambda: input("  Proceed with retraining? [y/N]: ").strip().lower()
-    )
-    confirmed = answer in ("y", "yes")
-    logger.info(f"[LangGraph] node_human_confirm: confirmed={confirmed}")
-    return {"human_confirmed": confirmed}
+    confirmed, dataset_path = await loop.run_in_executor(None, _prompt_user)
+    return {"human_confirmed": confirmed, "dataset_path": dataset_path}
+
+    # Staro 
+    # answer = await loop.run_in_executor(
+    #     None,
+    #     lambda: input("  Proceed with retraining? [y/N]: ").strip().lower()
+    # )
+    # confirmed = answer in ("y", "yes")
+    # logger.info(f"[LangGraph] node_human_confirm: confirmed={confirmed}")
+    # return {"human_confirmed": confirmed}
 
 
 def _route_after_confirm(state: MetricsState) -> str:
@@ -856,7 +921,9 @@ async def node_trigger_retrain(state: MetricsState) -> dict:
         return {"retrain_triggered": False, "retrain_command": "NOT FOUND"}
 
     # -u flag forsira unbuffered stdout — neophodan za real-time streaming
-    command     = ["python", "-u", str(torch_path)]
+    dataset_path = state.get("dataset_path") or "output/1d.csv"
+    command = ["python", "-u", str(torch_path), dataset_path, model_name]
+    # command     = ["python", "-u", str(torch_path)]
     command_str = " ".join(command)
     print(f"\n  Starting retrain: {command_str}")
     print(f"  Output model: {model_name}\n")
@@ -864,8 +931,12 @@ async def node_trigger_retrain(state: MetricsState) -> dict:
     try:
         proc = await asyncio.create_subprocess_exec(
             *command,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            # *command,
+            # stdout=asyncio.subprocess.PIPE,
+            # stderr=asyncio.subprocess.STDOUT,
         )
         print(f"  PID: {proc.pid}\n")
 
@@ -890,42 +961,45 @@ async def node_trigger_retrain(state: MetricsState) -> dict:
         "retrain_command":   command_str,
     }
 
+
+
 def build_analyzer_graph():
     """
     Kreira i kompajlira LangGraph graf za analizu metrika.
 
-    Trenutni tok (Korak 3):
-        load_and_compare => analyze_per_class => analyze_confusion => synthesize
-            => decision
+    Tok:
+        load_and_compare => load_attack_descriptions => analyze_per_class
+            => analyze_confusion => synthesize => decision
                 ├── SUGGEST_ONLY => END
-                ├── SCAN_FIRST   => scan_codebase => propose_hyperparams => END (Korak 4 dodaje human_confirm)
-                └── RETRAIN      => propose_hyperparams => END (Korak 4 dodaje human_confirm)
+                ├── SCAN_FIRST   => scan_codebase => propose_hyperparams => END
+                └── RETRAIN      => propose_hyperparams => END
+
+    Napomena: human_confirm i trigger_retrain su izvučeni iz grafa —
+    pozivaju se ručno iz langraph_test.py nakon što se prikažu rezultati.
     """
     graph = StateGraph(MetricsState)
 
     # --- Postojeći čvorovi ---
-    graph.add_node("load_and_compare",    node_load_and_compare_metrics)
-    graph.add_node("analyze_per_class",   node_analyze_per_class)
-    graph.add_node("analyze_confusion",   node_analyze_confusion)
-    graph.add_node("synthesize",          node_synthesize_recommendations)
+    graph.add_node("load_and_compare",       node_load_and_compare_metrics)
+    graph.add_node("load_attack_descriptions", node_load_attack_descriptions)
+    graph.add_node("analyze_per_class",      node_analyze_per_class)
+    graph.add_node("analyze_confusion",      node_analyze_confusion)
+    graph.add_node("synthesize",             node_synthesize_recommendations)
+    graph.add_node("decision",               node_decision)
+    graph.add_node("scan_codebase",          node_scan_codebase)
+    graph.add_node("propose_hyperparams",    node_propose_hyperparams)
 
-    # --- Čvorovi Koraka 2 ---
-    graph.add_node("decision",            node_decision)
-    graph.add_node("scan_codebase",       node_scan_codebase)
-
-    # --- Čvorovi Koraka 3 ---
-    graph.add_node("propose_hyperparams", node_propose_hyperparams)
-
-    # --- Čvorovi Koraka 4 ---
-    graph.add_node("human_confirm",       node_human_confirm)
-    graph.add_node("trigger_retrain",     node_trigger_retrain)
+    # --- Čvorovi Koraka 4 — više nisu deo grafa, pozivaju se iz langraph_test.py ---
+    # graph.add_node("human_confirm",   node_human_confirm)
+    # graph.add_node("trigger_retrain", node_trigger_retrain)
 
     # --- Sekvencijalne grane ---
     graph.set_entry_point("load_and_compare")
-    graph.add_edge("load_and_compare",    "analyze_per_class")
-    graph.add_edge("analyze_per_class",   "analyze_confusion")
-    graph.add_edge("analyze_confusion",   "synthesize")
-    graph.add_edge("synthesize",          "decision")
+    graph.add_edge("load_and_compare",         "load_attack_descriptions")
+    graph.add_edge("load_attack_descriptions", "analyze_per_class")
+    graph.add_edge("analyze_per_class",        "analyze_confusion")
+    graph.add_edge("analyze_confusion",        "synthesize")
+    graph.add_edge("synthesize",               "decision")
 
     # --- Conditional edges posle decision ---
     graph.add_conditional_edges(
@@ -934,25 +1008,87 @@ def build_analyzer_graph():
         {
             "SUGGEST_ONLY": END,
             "SCAN_FIRST":   "scan_codebase",
-            "RETRAIN":      "propose_hyperparams",   # preskace scan, ide direktno
+            "RETRAIN":      "propose_hyperparams",
         },
     )
 
-    # SCAN_FIRST grana: scan => propose
-    graph.add_edge("scan_codebase",       "propose_hyperparams")
+    graph.add_edge("scan_codebase",    "propose_hyperparams")
+    graph.add_edge("propose_hyperparams", END)
 
-    # propose_hyperparams trenutno završava na END (Korak 4 dodaje human_confirm)
-    graph.add_edge("propose_hyperparams", "human_confirm")
-
-    graph.add_conditional_edges(
-        "human_confirm",
-        _route_after_confirm,
-        {"retrain": "trigger_retrain", "skip": END},
-    )
-
-    graph.add_edge("trigger_retrain", END)
+    # --- Stare grane Koraka 4 — zakomentarisane ---
+    # graph.add_edge("propose_hyperparams", "human_confirm")
+    # graph.add_conditional_edges(
+    #     "human_confirm",
+    #     _route_after_confirm,
+    #     {"retrain": "trigger_retrain", "skip": END},
+    # )
+    # graph.add_edge("trigger_retrain", END)
 
     return graph.compile()
+
+# Stara implementacija
+# def build_analyzer_graph():
+#     """
+#     Kreira i kompajlira LangGraph graf za analizu metrika.
+
+#     Tok:
+#         load_and_compare => load_attack_descriptions => analyze_per_class
+#             => analyze_confusion => synthesize => decision
+#                 ├── SUGGEST_ONLY => END
+#                 ├── SCAN_FIRST   => scan_codebase => propose_hyperparams => END
+#                 └── RETRAIN      => propose_hyperparams => END
+
+#     Napomena: human_confirm i trigger_retrain su izvučeni iz grafa —
+#     pozivaju se ručno iz langraph_test.py nakon što se prikažu rezultati.
+#     """
+#     graph = StateGraph(MetricsState)
+
+#     # --- Postojeći čvorovi ---
+#     graph.add_node("load_and_compare",       node_load_and_compare_metrics)
+#     graph.add_node("load_attack_descriptions", node_load_attack_descriptions)
+#     graph.add_node("analyze_per_class",      node_analyze_per_class)
+#     graph.add_node("analyze_confusion",      node_analyze_confusion)
+#     graph.add_node("synthesize",             node_synthesize_recommendations)
+#     graph.add_node("decision",               node_decision)
+#     graph.add_node("scan_codebase",          node_scan_codebase)
+#     graph.add_node("propose_hyperparams",    node_propose_hyperparams)
+
+#     # --- Čvorovi Koraka 4 — više nisu deo grafa, pozivaju se iz langraph_test.py ---
+#     # graph.add_node("human_confirm",   node_human_confirm)
+#     # graph.add_node("trigger_retrain", node_trigger_retrain)
+
+#     # --- Sekvencijalne grane ---
+#     graph.set_entry_point("load_and_compare")
+#     graph.add_edge("load_and_compare",         "load_attack_descriptions")
+#     graph.add_edge("load_attack_descriptions", "analyze_per_class")
+#     graph.add_edge("analyze_per_class",        "analyze_confusion")
+#     graph.add_edge("analyze_confusion",        "synthesize")
+#     graph.add_edge("synthesize",               "decision")
+
+#     # --- Conditional edges posle decision ---
+#     graph.add_conditional_edges(
+#         "decision",
+#         _route_after_decision,
+#         {
+#             "SUGGEST_ONLY": END,
+#             "SCAN_FIRST":   "scan_codebase",
+#             "RETRAIN":      "propose_hyperparams",
+#         },
+#     )
+
+#     graph.add_edge("scan_codebase",    "propose_hyperparams")
+#     graph.add_edge("propose_hyperparams", END)
+
+#     # --- Stare grane Koraka 4 — zakomentarisane ---
+#     # graph.add_edge("propose_hyperparams", "human_confirm")
+#     # graph.add_conditional_edges(
+#     #     "human_confirm",
+#     #     _route_after_confirm,
+#     #     {"retrain": "trigger_retrain", "skip": END},
+#     # )
+#     # graph.add_edge("trigger_retrain", END)
+
+#     return graph.compile()
 
 
 # Globalna instanca deli se kroz celu aplikaciju
