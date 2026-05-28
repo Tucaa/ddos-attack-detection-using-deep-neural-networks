@@ -25,7 +25,7 @@ def get_http_client() -> httpx.AsyncClient:
     return _http_client
 
 
-def _extract_json(raw: str) -> str:
+def extract_json(raw: str) -> str:
     """
     Izvlaci JSON iz odgovora koji moze biti umotan u markdown code blok.
     Ollama cesto vraca ```json ... ``` omotac.
@@ -36,7 +36,7 @@ def _extract_json(raw: str) -> str:
     return raw.strip()
 
 
-async def _get_active_model(client: httpx.AsyncClient) -> str:
+async def get_active_model(client: httpx.AsyncClient) -> str:
     """
     Dinamicki odredjuje model koji ce biti koriscen.
     Prvo gleda ENV varijablu, zatim proverava sta je dostupno
@@ -66,7 +66,7 @@ async def _get_active_model(client: httpx.AsyncClient) -> str:
     return _cached_model
 
 
-# async def _get_active_model(client: httpx.AsyncClient) -> str:
+# async def get_active_model(client: httpx.AsyncClient) -> str:
 
 #     # Ako je model eksplicitno prosledjen kroz ENV, koristi njega
 #     env_model = os.getenv("OLLAMA_MODEL")
@@ -97,7 +97,7 @@ async def ollama_generate(prompt: str, system: str = "") -> str:
 #     Vraca sirovi tekstualni odgovor modela.
 #     """
     client = get_http_client()
-    active_model = await _get_active_model(client)
+    active_model = await get_active_model(client)
 
     payload = {
         "model": active_model,
@@ -121,7 +121,7 @@ async def ollama_generate(prompt: str, system: str = "") -> str:
 #     """
 #     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
 #         # Model se odredjuje dinamicki pri svakom pozivu
-#         active_model = await _get_active_model(client)
+#         active_model = await get_active_model(client)
 
 #         payload = {
 #             "model": active_model,
@@ -176,7 +176,7 @@ async def generate_attack_scenario(attack_type: str, window_size: int, feature_n
     )
 
     raw = await ollama_generate(prompt, system)
-    clean = _extract_json(raw)
+    clean = extract_json(raw)
 
     try:
         matrix = json.loads(clean)
@@ -217,7 +217,8 @@ async def generate_attack_scenario(attack_type: str, window_size: int, feature_n
 
     return matrix
 
-
+# Ovo se i sto ne korsiti!! Trebalo je da se koristi u kombinaciji sa inferencom ali generisanje podataka za inference preko ollame nije dalo dobre rezultate
+# Pa je zbog toga 
 async def generate_attack_analysis(predicted_class: str,confidence: float,is_attack: bool, class_probabilities: dict[str, float], attack_type_requested: str) -> dict:
     """
     Koristi Ollamu da analizira rezultate LSTM modela i generise
@@ -253,7 +254,7 @@ async def generate_attack_analysis(predicted_class: str,confidence: float,is_att
     )
 
     raw = await ollama_generate(prompt, system)
-    clean = _extract_json(raw)
+    clean = extract_json(raw)
 
     try:
         result = json.loads(clean)
@@ -294,7 +295,7 @@ async def generate_attack_descriptions(attacks_source: str) -> dict[str, dict]:
     )
 
     raw = await ollama_generate(prompt, system)
-    clean = _extract_json(raw)
+    clean = extract_json(raw)
 
     try:
         result = json.loads(clean)

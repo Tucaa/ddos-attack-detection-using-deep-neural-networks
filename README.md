@@ -400,6 +400,7 @@ The `api-service` waits for a healthy `llama-engine` before starting (Docker hea
 |---|---|---|
 | `GET` | `/` | Root health check |
 | `GET` | `/health` | Model status, window size, feature count, class list |
+| `GET` | `/attacks/info` | LLM-generated technical descriptions of all attack types (cached after first call) |
 | `POST` | `/predict` | Single-window inference from a JSON feature matrix |
 | `POST` | `/predict/file` | Batch inference from an uploaded CSV file |
 | `POST` | `/simulate` | End-to-end pipeline: Ollama generates scenario → LSTM classifies → Ollama analyzes |
@@ -441,7 +442,7 @@ Loads the trained checkpoint and exposes inference methods. Contains a self-cont
   - `predict_single(window)` — Runs inference on a single pre-built window (list of lists); used by the `/predict` JSON endpoint.
   - `predict_from_df(df, batch_size)` — Builds all sliding windows from a DataFrame and runs batched inference; used by the `/predict/file` endpoint.
 
-The module also exports `model_wrapper`, a global singleton instance shared across the application.
+The module exports `model_wrapper`, a global singleton instance shared across the application.
 
 ---
 
@@ -455,6 +456,7 @@ FastAPI application definition. Registers all routes, loads the model on startup
 **Route handlers:**
 - `root()` — Returns a simple confirmation message that the API is running.
 - `health()` — Returns model load status, window size, feature count, and class list as a `HealthResponse`.
+- `attacks_info()` — New endpoint (`GET /attacks/info`) that reads `attacks.py` from disk, calls Ollama's `generate_attack_descriptions` to produce a structured JSON description of every attack type, and caches the result in memory (`_attack_descriptions_cache`) so Ollama is called only once per process lifetime.
 - `predict(request)` — Accepts a `PredictRequest` JSON body (one full sliding window), calls `model_wrapper.predict_single`, and returns a `PredictResponse` with the predicted class, confidence, attack flag, and per-class probabilities.
 - `predict_file(file)` — Accepts a CSV file upload, reads it into a DataFrame, calls `model_wrapper.predict_from_df`, and returns a `FileInferenceResponse` with per-window predictions and an attack window count.
 - `simulate(request)` — Three-step pipeline: (1) calls Ollama to generate a synthetic traffic matrix for the requested attack type, (2) runs LSTM inference on it, (3) calls Ollama to generate a human-readable attack description and mitigation steps; returns a `SimulateResponse`.
@@ -478,7 +480,7 @@ Pydantic models for all request and response bodies. Enforces field counts and v
 - `HealthResponse` — Model status, window size, feature count, class list.
 - `AttackAnalysis` — LLM-generated attack description and list of mitigation steps.
 - `SimulateResponse` — Full simulate result combining prediction fields and an `AttackAnalysis`.
-- `ClassMetrics` — Per-class precision/recall/F1/support; supports both `f1-score` (sklearn) and `f1_score` field name variants.
+- `ClassMetrics` — Per-class precision/recall/F1/support; supports both `f1-score` (sklearn) and `f1_score` field name variants via Pydantic alias.
 - `AnalysisRecommendations` — Three lists of strings: `data_generation`, `model`, and `training` recommendations.
 - `AnalyzeResponse` — Full LangGraph output: weak classes, per-class analysis text, confusion pattern text, recommendations, and summary.
 
@@ -486,43 +488,125 @@ Pydantic models for all request and response bodies. Enforces field counts and v
 
 #### `ollama_client.py`
 
-Async HTTP client for communicating with the Ollama LLM engine. All functions use `httpx.AsyncClient` and expect Ollama to be running at `OLLAMA_HOST` (env, default `http://localhost:11434`).
+Async HTTP client for communicating with the Ollama LLM engine. Uses a **shared persistent `httpx.AsyncClient`** (created once, reused across all requests) and **dynamic model detection** (checks the Ollama server for available models instead of requiring a hardcoded name).
+
+**Module-level state:**
+- `_http_client` — Shared `httpx.AsyncClient` instance; created lazily on first use and reused for the lifetime of the process.
+- `_cached_model` — Cached model name; resolved once from env or Ollama `/api/tags`, then reused on every subsequent call to avoid repeated HTTP lookups.
 
 **Functions:**
+- `get_http_client()` — Returns the shared `httpx.AsyncClient`, creating a new one if it has been closed.
 - `_extract_json(raw)` — Strips markdown code fences (` ```json ... ``` `) from Ollama responses before JSON parsing; Ollama frequently wraps structured output in markdown.
-- `ollama_generate(prompt, system)` — Generic async call to Ollama `/api/generate`; returns the raw text response and raises `RuntimeError` if Ollama is unreachable.
-- `generate_attack_scenario(attack_type, window_size, feature_names)` — Prompts Ollama to generate a `window_size × len(feature_names)` float matrix simulating the requested attack type; validates dimensions and clamps negative values to 0.
+- `_get_active_model(client)` — Resolves the model to use: first checks `OLLAMA_MODEL` env var, then queries Ollama `/api/tags` for available models (preferring `llama3.1:8b`), with `llama3.1:8b` as a final fallback; result is cached in `_cached_model`.
+- `ollama_generate(prompt, system)` — Generic async call to Ollama `/api/generate` using the shared client and dynamically resolved model; raises `RuntimeError` if Ollama is unreachable.
+- `generate_attack_scenario(attack_type, window_size, feature_names)` — Prompts Ollama to generate a `window_size × len(feature_names)` float matrix simulating the requested attack type; handles Ollama returning too many or too few rows by slicing or randomly duplicating existing rows rather than raising an error.
 - `generate_attack_analysis(predicted_class, confidence, is_attack, class_probabilities, attack_type_requested)` — Prompts Ollama to analyze LSTM prediction results and return a structured JSON with a technical `description` paragraph and a list of `mitigation_steps`; falls back to raw text if JSON parsing fails.
+- `generate_attack_descriptions(attacks_source)` — Takes the full source code of `attacks.py` as a string and prompts Ollama to return a JSON object mapping each attack name to a `description` paragraph and a `characteristics` list; used by both `/attacks/info` and the LangGraph `node_load_attack_descriptions`.
 
 ---
 
 #### `langraph.py`
 
-> ⚠️ **Work in progress.** The LangGraph analysis pipeline is functional but not yet connected to the main API router.
+Implements the full **LangGraph analysis and retraining pipeline**. The graph loads evaluation metrics, compares them against a previous run, runs LLM analysis, makes a deterministic decision about the next action, optionally scans the project codebase, proposes new hyperparameters, and — after user confirmation outside the graph — can trigger a full model retraining subprocess.
 
-Implements a three-node sequential **LangGraph** graph that takes model evaluation metrics as input and produces actionable improvement recommendations by calling the Ollama LLM at each step.
+**Graph flow:**
 
-**State:**
+```
+load_and_compare ──► load_attack_descriptions ──► analyze_per_class
+    ──► analyze_confusion ──► synthesize ──► decision
+            ├── SUGGEST_ONLY ──► END
+            ├── SCAN_FIRST   ──► scan_codebase ──► propose_hyperparams ──► END
+            └── RETRAIN      ──► propose_hyperparams ──► END
 
-`MetricsState` (TypedDict) carries all data through the graph:
-- Inputs: `classification_report`, `confusion_matrix`, `mcc_score`, `roc_auc_scores`, `class_labels`
-- Intermediates: `per_class_analysis`, `confusion_analysis`
-- Outputs: `weak_classes`, `recommendations`, `summary`
+[human_confirm and trigger_retrain are called manually after the graph finishes]
+```
+
+**Decision thresholds:**
+- `DECISION_RETRAIN_MCC = 0.75` — MCC below this forces `RETRAIN`.
+- `DECISION_SCAN_MCC = 0.85` — MCC below this (or any regression detected) triggers `SCAN_FIRST`.
+- Above `DECISION_SCAN_MCC` with no regression → `SUGGEST_ONLY`.
+
+**State (`MetricsState` TypedDict):**
+
+| Field | Direction | Description |
+|---|---|---|
+| `classification_report`, `confusion_matrix`, `mcc_score`, `roc_auc_scores`, `class_labels` | Input | Current run metrics |
+| `previous_metrics`, `metrics_delta`, `regression_detected` | Computed | Delta vs previous run |
+| `per_class_analysis`, `confusion_analysis`, `attack_descriptions` | Intermediate | LLM outputs |
+| `weak_classes`, `recommendations`, `summary` | Output | Analysis results |
+| `decision`, `scanned_files`, `proposed_hyperparams` | Output | Action plan |
+| `human_confirmed`, `retrain_triggered`, `retrain_command` | Output | Retrain status |
+| `dataset_path`, `model_name` | Config | Set during human confirmation |
 
 **Helper functions:**
-- `_format_per_class_metrics(report, roc_auc, mcc)` — Formats per-class precision/recall/F1/ROC-AUC into a readable string for use in LLM prompts.
-- `_format_confusion_matrix(matrix, labels)` — Renders the confusion matrix as an ASCII table for use in LLM prompts.
+- `_format_per_class_metrics(report, roc_auc, mcc)` — Formats per-class metrics into a readable string for LLM prompts.
+- `_format_confusion_matrix(matrix, labels)` — Renders the confusion matrix as an ASCII table for LLM prompts.
 - `_safe_parse_json(raw, fallback)` — Attempts to parse an LLM response as JSON after stripping markdown fences; returns a fallback dict if parsing fails.
+- `_compute_delta(current, previous)` — Compares current metrics against a previous run; returns a delta dict and a `regression_detected` bool (True if MCC dropped, macro F1 dropped, or any class lost ≥ 0.03 F1).
+- `_route_after_decision(state)` — Routing function for the conditional edge after `node_decision`; returns `"SUGGEST_ONLY"`, `"SCAN_FIRST"`, or `"RETRAIN"`.
+- `_route_after_confirm(state)` — Routing function for the conditional edge after `node_human_confirm`; returns `"retrain"` or `"skip"`.
+- `_find_file_recursive(filename, root)` — Recursively searches for a file by name under `root`, skipping directories in `SCAN_SKIP_DIRS` (`__pycache__`, `venv`, `.git`, etc.).
+- `_validate_hyperparams(proposed)` — Validates LLM-proposed hyperparameters against `_HYPERPARAMETER_SPACE`; clamps out-of-range values to the nearest valid choice or range bound instead of rejecting them.
+- `_patch_hyperparam_file(hp_path, proposed)` — Writes proposed hyperparameters into `hyperparam.py` using regex substitution; creates a `.bak` backup before modifying.
+- `_prompt_user()` — Synchronous helper that reads user confirmation and dataset path from stdin; called inside `run_in_executor` so it doesn't block the async event loop.
 
 **Graph nodes:**
-- `node_analyze_per_class(state)` — Sends per-class metrics to Ollama and asks it to identify weak classes (below F1 < 0.80, recall < 0.75, or ROC-AUC < 0.85) and explain why they underperform; populates `weak_classes` and `per_class_analysis`.
-- `node_analyze_confusion(state)` — Sends the confusion matrix (as ASCII table) and previously identified weak classes to Ollama; identifies the top misclassification pairs and their likely causes; populates `confusion_analysis`.
-- `node_synthesize_recommendations(state)` — Synthesizes all prior analysis into three concrete recommendation lists (`data_generation`, `model`, `training`) plus a one-paragraph executive summary; populates `recommendations` and `summary`.
+- `node_load_and_compare_metrics(state)` — Loads `test_metrics_prev.json` if it exists, calls `_compute_delta`, and populates `previous_metrics`, `metrics_delta`, and `regression_detected`; no LLM call.
+- `node_load_attack_descriptions(state)` — Finds `attacks.py` recursively, reads its source, and calls `generate_attack_descriptions` to produce LLM-generated technical descriptions of each attack type; populates `attack_descriptions`.
+- `node_analyze_per_class(state)` — Sends per-class metrics (enriched with regression delta context and attack descriptions) to Ollama; identifies weak classes (F1 < 0.80, recall < 0.75, or ROC-AUC < 0.85) and explains why they underperform; populates `weak_classes` and `per_class_analysis`.
+- `node_analyze_confusion(state)` — Sends the ASCII confusion matrix and previously identified weak classes to Ollama; identifies top misclassification pairs and their likely causes; populates `confusion_analysis`.
+- `node_synthesize_recommendations(state)` — Synthesizes all prior analysis (including regression trend) into three recommendation lists (`data_generation`, `model`, `training`) and a summary; normalizes LLM responses that return dicts instead of plain strings; populates `recommendations` and `summary`.
+- `node_decision(state)` — Pure Python; applies MCC thresholds and regression flag to set `decision` deterministically; no LLM call.
+- `node_scan_codebase(state)` — Determines which source files to read based on `weak_classes` (using `CLASS_TO_FILES` mapping), reads each file recursively up to `SCAN_MAX_CHARS_PER_FILE` characters, and populates `scanned_files`; always includes `hyperparam.py` and `config.py`.
+- `node_propose_hyperparams(state)` — Prompts Ollama with analysis results and scanned file excerpts to propose concrete hyperparameter values strictly within `_HYPERPARAMETER_SPACE`; runs the response through `_validate_hyperparams` before storing in `proposed_hyperparams`.
+- `node_human_confirm(state)` — Blocks execution and waits for user confirmation in the terminal via `run_in_executor`; displays proposed hyperparameters and LLM reasoning; populates `human_confirmed` and `dataset_path`.
+- `node_trigger_retrain(state)` — Finds `torch_nn.py` and `hyperparam.py` recursively, patches hyperparameters with `_patch_hyperparam_file`, generates a timestamped model output name, and launches `torch_nn.py` as an async subprocess with stdout streamed line by line; populates `retrain_triggered` and `retrain_command`.
+- `build_analyzer_graph()` — Assembles and compiles the full LangGraph `StateGraph`; `node_human_confirm` and `node_trigger_retrain` are intentionally excluded from the graph and called manually after the graph finishes.
 
-**Graph assembly:**
-- `build_analyzer_graph()` — Registers the three nodes with sequential edges (`per_class → confusion → synthesize → END`) and compiles the graph.
+The module exports `analyzer_graph`, a compiled global graph instance invoked via `await analyzer_graph.ainvoke(state)`.
 
-The module exports `analyzer_graph`, a compiled global graph instance ready for invocation via `await analyzer_graph.ainvoke(state)`.
+---
+
+#### `langraph_test.py`
+
+Interactive CLI runner for the full LangGraph analysis pipeline. Loads evaluation metrics from a JSON file, runs the compiled graph, prints a structured report, and then calls `node_human_confirm` and (if confirmed) `node_trigger_retrain` manually after the graph finishes. Saves the full analysis result to `langgraph_analysis.json` and backs up current metrics to `test_metrics_prev.json` for delta comparison on the next run.
+
+**Functions:**
+- `get_user_input()` — Prompts the user for the metrics file path and optional Ollama host URL before the graph starts.
+- `separator(char, width)` — Prints a horizontal rule for terminal output formatting.
+- `section(title)` — Prints a titled section header with surrounding separators.
+- `print_list(items, indent)` — Prints a numbered list of recommendation strings with line wrapping at 90 characters; handles cases where the LLM returned dicts instead of plain strings.
+- `print_attack_descriptions(descriptions)` — Prints a compact per-attack summary of description and key characteristics for the attack types section of the report.
+- `print_results(state)` — Renders the full analysis report to stdout: regression delta, weak classes, attack descriptions, per-class analysis, confusion analysis, all three recommendation categories, decision outcome, proposed hyperparameters, scanned files, and executive summary.
+- `check_ollama(host)` — Async function that pings Ollama `/api/tags` and prints available models; the runner exits if Ollama is unreachable.
+- `run_test(metrics_path, ollama_url)` — Main async entry point: sets up env, loads the metrics JSON, builds the initial `MetricsState`, invokes the graph, backs up metrics, prints results, handles human confirmation and retrain, and saves output JSON.
+
+**Usage:**
+```bash
+python langraph_test.py
+# Enter path to metrics file (default: results/test_metrics.json):
+# Enter Ollama host url (default: OLLAMA_HOST env var or http://localhost:11434):
+```
+
+---
+
+#### `langraph_test_retrain.py`
+
+Unit test suite for the retraining-related functions in `langraph.py`. Tests run entirely with mock state and patched subprocess calls — no Ollama connection or real model required.
+
+**Test classes:**
+
+- `TestValidateHyperparams` — Verifies that `_validate_hyperparams` passes valid choices through unchanged, clamps invalid choice values to the nearest valid option, clamps range values that exceed bounds, and silently skips parameters not present in the proposed dict.
+- `TestNodeDecision` — Verifies the deterministic MCC threshold logic: `SUGGEST_ONLY` above 0.85 with no regression, `SCAN_FIRST` in the 0.75–0.85 range, `RETRAIN` below 0.75, and `SCAN_FIRST` when regression is detected even if MCC exceeds the scan threshold.
+- `TestNodeHumanConfirm` — Verifies that `node_human_confirm` sets `human_confirmed=True` on `"y"` or `"yes"` input and `False` on `"n"`, empty string, or any unrecognized input.
+- `TestRouteAfterConfirm` — Verifies that `_route_after_confirm` returns `"retrain"` when confirmed and `"skip"` when not.
+- `TestPatchHyperparamFile` — Verifies that `_patch_hyperparam_file` creates a `.bak` backup before writing, correctly patches `choice`-type parameters (single-element list), correctly patches `range`-type parameters (collapsed to a point range), and leaves unrelated lines unchanged.
+- `TestNodeTriggerRetrain` — Verifies (using mocked `subprocess.Popen` and `_find_file_recursive`) that `node_trigger_retrain` sets `retrain_triggered=True` on success, includes `torch_nn.py` in the retrain command, calls `Popen` exactly once, and sets `retrain_triggered=False` without calling `Popen` when `torch_nn.py` is not found.
+
+**Usage:**
+```bash
+python langraph_test_retrain.py
+```
 
 ---
 
@@ -550,7 +634,7 @@ Interactive test suite for validating the Ollama integration and full API pipeli
 ```bash
 python ollama_test.py                          # interactive menu (default)
 python ollama_test.py --test all --verbose
-python ollama_test.py --test simulate --attack syn-flood
+python ollama_test.py --test simulate --attack syn_flood
 ```
 
 **Helper functions:**
@@ -590,7 +674,7 @@ This will:
 |---|---|---|
 | `MODEL_PATH` | `ddos_lstm_attention.pt` | Path to the PyTorch checkpoint inside the container |
 | `OLLAMA_HOST` | `http://llama-engine:11434` | Ollama service URL (internal Docker network) |
-| `OLLAMA_MODEL` | `llama3.2` | LLM model name to use for generation |
+| `OLLAMA_MODEL` | *(auto-detected)* | LLM model name; if unset, the API queries Ollama for available models and prefers `llama3.1:8b` |
 | `WINDOW_SIZE` | `20` | Sliding window length (must match training) |
 | `LSTM_HIDDEN_SIZE` | `128` | Must match checkpoint |
 | `LSTM_NUM_LAYERS` | `2` | Must match checkpoint |
@@ -603,5 +687,4 @@ docker compose down
 
 **Dockerfile notes:**
 - Base image: `python:3.11-slim`
-- PyTorch is installed separately from PyPI using the `+cu121` CUDA 12.1 wheel index to ensure GPU support; the standard PyPI index does not carry CUDA builds.
-- All other dependencies are installed from `requirements.txt`.
+- PyTorch is installed separately using the `+cu121` CUDA 12.1 wheel index; the standard PyPI index does not carry CUDA builds.

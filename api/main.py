@@ -63,7 +63,7 @@ app.add_middleware(
 )
 
 
-# --- Meta ---
+# Meta
 
 @app.get("/", tags=["Meta"])
 async def root():
@@ -81,7 +81,7 @@ async def health():
     )
 
 
-# --- Inference ---
+# Inference 
 
 @app.post("/predict", response_model=PredictResponse, tags=["Inference"])
 async def predict(request: PredictRequest):
@@ -162,7 +162,7 @@ async def simulate(request: SimulateRequest):
             ),
         )
 
-    # Korak 1: Ollama generise matricu saobracaja
+    # Prvo Ollama generise matricu saobracaja
     logger.info(f"[simulate] Generating scenario for: {request.attack_type}")
     try:
         matrix = await generate_attack_scenario(attack_type=request.attack_type,window_size=WINDOW_SIZE, feature_names=FEATURE_NAMES)
@@ -170,7 +170,7 @@ async def simulate(request: SimulateRequest):
         logger.error(f"[simulate] Scenario generation error: {e}")
         raise HTTPException(status_code=502, detail=f"Ollama scenario error: {e}")
 
-    # Korak 2: LSTM klasifikacija
+    # Drugo LSTM klasifikacija
     logger.info("[simulate] Running LSTM inference...")
     try:
         prediction = model_wrapper.predict_single(matrix)
@@ -183,7 +183,7 @@ async def simulate(request: SimulateRequest):
         f"(confidence={prediction['confidence']:.3f})"
     )
 
-    # Korak 3: Ollama analiza
+    # Ollama analiza
     logger.info("[simulate] Generating analysis...")
     try:
         analysis_data = await generate_attack_analysis(

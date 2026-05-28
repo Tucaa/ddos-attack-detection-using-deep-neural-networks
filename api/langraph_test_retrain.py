@@ -18,10 +18,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-# ---------------------------------------------------------------------------
-# Pomoćni mock state
-# ---------------------------------------------------------------------------
 
+# Pomoćni mock state
 def _make_state(decision: str = "SCAN_FIRST", mcc: float = 0.78, confirmed: bool = False) -> dict:
     """Kreira minimalni MetricsState za testove koji ne prolaze kroz Ollama čvorove."""
     return {
@@ -54,9 +52,9 @@ def _make_state(decision: str = "SCAN_FIRST", mcc: float = 0.78, confirmed: bool
     }
 
 
-# ---------------------------------------------------------------------------
+
 # Test: _validate_hyperparams
-# ---------------------------------------------------------------------------
+
 
 class TestValidateHyperparams(unittest.TestCase):
     """Provera da validacija drži vrednosti unutar HYPERPARAMETER_SPACE."""
@@ -98,10 +96,8 @@ class TestValidateHyperparams(unittest.TestCase):
         self.assertNotIn("num_layers", result)
 
 
-# ---------------------------------------------------------------------------
-# Test: node_decision
-# ---------------------------------------------------------------------------
 
+# Test: node_decision
 class TestNodeDecision(unittest.TestCase):
     """Provera deterministicke decision logike bez LLM-a."""
 
@@ -137,10 +133,8 @@ class TestNodeDecision(unittest.TestCase):
         self.assertEqual(result["decision"], "SCAN_FIRST")
 
 
-# ---------------------------------------------------------------------------
-# Test: node_human_confirm
-# ---------------------------------------------------------------------------
 
+# Test: node_human_confirm
 class TestNodeHumanConfirm(unittest.TestCase):
     """Provera da human_confirm ispravno čita korisnički unos."""
 
@@ -167,10 +161,8 @@ class TestNodeHumanConfirm(unittest.TestCase):
         self.assertFalse(self._run("maybe")["human_confirmed"])
 
 
-# ---------------------------------------------------------------------------
-# Test: _route_after_confirm
-# ---------------------------------------------------------------------------
 
+# Test: _route_after_confirm
 class TestRouteAfterConfirm(unittest.TestCase):
     """Provera routing logike posle human_confirm."""
 
@@ -187,10 +179,8 @@ class TestRouteAfterConfirm(unittest.TestCase):
         self.assertEqual(self.route(state), "skip")
 
 
-# ---------------------------------------------------------------------------
-# Test: _patch_hyperparam_file
-# ---------------------------------------------------------------------------
 
+# Test: _patch_hyperparam_file
 class TestPatchHyperparamFile(unittest.TestCase):
     """
     Provera da _patch_hyperparam_file ispravno menja vrednosti u fajlu
@@ -242,10 +232,8 @@ HYPERPARAMETER_SPACE = {
         self.assertIn('"seq_len":       [20, 30, 50]', content)
 
 
-# ---------------------------------------------------------------------------
-# Test: node_trigger_retrain (mock subprocess)
-# ---------------------------------------------------------------------------
 
+# Test: node_trigger_retrain (mock subprocess)
 class TestNodeTriggerRetrain(unittest.TestCase):
     """
     Provera da node_trigger_retrain ispravno konstruiše komandu i
@@ -296,10 +284,8 @@ class TestNodeTriggerRetrain(unittest.TestCase):
         mock_popen.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# Pokretanje
-# ---------------------------------------------------------------------------
 
+# Pokretanje
 if __name__ == "__main__":
     print("=" * 65)
     print("  LangGraph Retrain — Unit Tests (Korak 4)")

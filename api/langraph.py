@@ -5,17 +5,21 @@ from typing import TypedDict, Optional
 import shutil
 import asyncio
 import subprocess
+from ollama_client import generate_attack_descriptions
+import re
+
+
 
 from langgraph.graph import StateGraph, END
 
-from ollama_client import ollama_generate, _extract_json
+from ollama_client import ollama_generate, extract_json
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
+
 # Paths
-# ---------------------------------------------------------------------------
+
 
 METRICS_PATH      = Path("results/test_metrics.json")
 PREV_METRICS_PATH = Path("results/test_metrics_prev.json")
@@ -26,8 +30,8 @@ DECISION_SCAN_MCC       = 0.85   # MCC ispod ovoga => SCAN_FIRST
 # Iznad DECISION_SCAN_MCC i bez regresije => SUGGEST_ONLY
 
 # Mapiranje: tip napada => fajlovi relevantni za skeniranje
-# Uvek se čitaju config.py i hyperparam.py
-ALWAYS_SCAN = ["hyperparam.py", "config.py"]
+# Uvek se čitaju config.py i hyperparameters.py
+ALWAYS_SCAN = ["torch_nn.py", "hyperparameters.py", "config.py"]
 
 # U slucaju da korisnik ne unese path, trebace malo elegantnije da se handeluje
 DEFAULT_DATASET_PATH = "output/1d.csv"
@@ -47,40 +51,47 @@ CLASS_TO_FILES: dict[str, list[str]] = {
 
 # Maksimalan broj karaktera po fajlu koji se prosledjuje LLM-u
 # (sprecava prekoracenje kontekst prozora Ollame)
-SCAN_MAX_CHARS_PER_FILE = 3000
+SCAN_MAX_CHARS_PER_FILE = 1500
+
+PROJECT_SCAN_FILES: dict[str, list[str]] = {
+    "api": ["main.py", "ollama_client.py", "langraph.py", "langraph_test.py"],
+    ".":   ["torch_nn.py", "attacks.py", "config.py"],
+}
+PROJECT_SCAN_MAX_FILES      = 10
 
 # Folderi koji se preskačaju pri rekurzivnom skeniranju
 SCAN_SKIP_DIRS: set[str] = {"__pycache__", "venv", ".venv", ".git", ".idea"}
 
 
-# ---------------------------------------------------------------------------
+
 # State
-# ---------------------------------------------------------------------------
 
 class MetricsState(TypedDict):
-    # --- Ulaz (trenutni run) ---
+    #  Ulaz (trenutni run) 
+    # Dodato na pocetku
+    project_description: str
     classification_report: dict   # {klasa: {precision, recall, f1-score, support}}
     confusion_matrix: list        # 2D lista integera (num_classes x num_classes)
     mcc_score: float
     roc_auc_scores: dict          # {klasa: float}
     class_labels: list            # lista naziva klasa u ispravnom redosledu
 
-    # --- Poređenje sa prethodnim runom ---
+    # Poređenje sa prethodnim runom 
     previous_metrics: dict        # sadrzaj test_metrics_prev.json, {} ako ne postoji
     metrics_delta: dict           # {mcc_delta, macro_f1_delta, per_class_f1_delta: {klasa: delta}}
     regression_detected: bool     # True ako je bilo koji indikator gori nego pre
 
-    # --- Medjurezultati analize ---
+    # Medjurezultati analize 
     per_class_analysis: str
     confusion_analysis: str
     attack_descriptions: dict
 
-    # --- Izlaz analize ---
+    # Izlaz analize
     weak_classes: list            # nazivi klasa sa losim performansama
     recommendations: dict         # {data_generation: [], model: [], training: []}
     summary: str
 
-    # --- Decision i akcija ---
+    # Decision i akcija 
     decision: str                 # "SUGGEST_ONLY" | "SCAN_FIRST" | "RETRAIN"
     scanned_files: dict           # {filename: sadrzaj} — puni node_scan_codebase
     proposed_hyperparams: dict    # predlozene vrednosti iz HYPERPARAMETER_SPACE
@@ -94,11 +105,7 @@ class MetricsState(TypedDict):
 
 
 
-def _format_per_class_metrics(
-    report: dict,
-    roc_auc: dict,
-    mcc: float,
-) -> str:
+def format_per_class_metrics(report: dict, roc_auc: dict, mcc: float) -> str:
     """Formatira per-class metrike u citljiv string za LLM prompt."""
     lines = [f"Overall MCC: {mcc:.4f}\n"]
     for cls, m in report.items():
@@ -115,7 +122,7 @@ def _format_per_class_metrics(
     return "\n".join(lines)
 
 
-def _format_confusion_matrix(matrix: list, labels: list) -> str:
+def format_confusion_matrix(matrix: list, labels: list) -> str:
     """Formatira matricu konfuzije kao ASCII tabelu za LLM prompt."""
     col_width = max(len(l) for l in labels) + 2
     header = " " * col_width + "  ".join(f"{l:>{col_width}}" for l in labels)
@@ -128,9 +135,9 @@ def _format_confusion_matrix(matrix: list, labels: list) -> str:
     return header + "\n" + "\n".join(rows)
 
 
-def _safe_parse_json(raw: str, fallback: dict) -> dict:
+def safe_parse_json(raw: str, fallback: dict) -> dict:
     """Pokusava da parsira JSON iz LLM odgovora, vraca fallback ako ne uspe."""
-    clean = _extract_json(raw)
+    clean = extract_json(raw)
     try:
         return json.loads(clean)
     except json.JSONDecodeError as e:
@@ -138,11 +145,8 @@ def _safe_parse_json(raw: str, fallback: dict) -> dict:
         return fallback
 
 
-# ---------------------------------------------------------------------------
 # Helper: računanje delte između dva run-a
-# ---------------------------------------------------------------------------
-
-def _compute_delta(current: dict, previous: dict) -> tuple[dict, bool]:
+def compute_delta(current: dict, previous: dict) -> tuple[dict, bool]:
     """
     Poredi trenutne metrike sa prethodnim runom.
 
@@ -200,11 +204,137 @@ def _compute_delta(current: dict, previous: dict) -> tuple[dict, bool]:
 
     return delta, regression
 
+def read_file_content(filepath: Path) -> str | None:
+    """Čita fajl i skraćuje ga na SCAN_MAX_CHARS_PER_FILE. Vraća None ako ne uspe."""
+    try:
+        content = filepath.read_text(encoding="utf-8")
+        if len(content) > SCAN_MAX_CHARS_PER_FILE:
+            content = (
+                content[:SCAN_MAX_CHARS_PER_FILE]
+                + f"\n... [truncated — {len(content)} total chars]"
+            )
+        return content
+    except Exception as e:
+        logger.warning(f"  Could not read {filepath}: {e}")
+        return None
 
-# ---------------------------------------------------------------------------
-# Node 0: Učitavanje i poređenje metrika
-# ---------------------------------------------------------------------------
+async def node_scan_project_description(state: MetricsState) -> dict:
+    """
+    Prvi čvor u grafu. Čita fajlove definisane u PROJECT_SCAN_FILES
+    i koristi Ollamu da generiše tehnički opis projekta kao kontekst
+    za sve naredne LLM čvorove.
 
+    Popunjava: project_description
+    """
+    logger.info("[LangGraph] node_scan_project_description: start")
+
+    root          = Path(".")
+    file_excerpts: dict[str, str] = {}
+
+    for dir_name, filenames in PROJECT_SCAN_FILES.items():
+
+        # Određivanje search roota za ovaj direktorijum
+        if dir_name == ".":
+            search_root = root
+        else:
+            search_root = None
+            candidate   = root / dir_name
+
+            if candidate.is_dir():
+                search_root = candidate
+            else:
+                for p in root.rglob(dir_name):
+                    if p.is_dir() and not any(
+                        part in SCAN_SKIP_DIRS for part in p.parts
+                    ):
+                        search_root = p
+                        break
+
+            if search_root is None:
+                logger.warning(f"  Directory not found: {dir_name}/ — skipping")
+                continue
+
+        logger.info(f"  Scanning {dir_name}/: {filenames}")
+
+        for filename in filenames:
+            if len(file_excerpts) >= PROJECT_SCAN_MAX_FILES:
+                break
+
+            filepath = find_file_recursive(filename, search_root)
+            if filepath is None:
+                logger.info(f"  Not found: {filename} in {dir_name}/ — skipping")
+                continue
+
+            content = read_file_content(filepath)
+            if content:
+                rel_key = str(filepath.relative_to(root))
+                file_excerpts[rel_key] = content
+                logger.info(f"  Read {rel_key}: {len(content)} chars")
+
+    if not file_excerpts:
+        logger.warning("  No project files found — skipping description generation.")
+        return {"project_description": "No project files could be read."}
+
+    logger.info(f"  Total files for context: {len(file_excerpts)}")
+
+    files_block = "\n\n".join(
+        f"--- {name} ---\n{content}"
+        for name, content in file_excerpts.items()
+    )
+
+    prompt = f"""You are analyzing a machine learning project with a FastAPI backend.
+    Based on the following source files, generate a concise technical description.
+
+    {files_block}
+
+    Respond ONLY with a valid JSON object:
+    {{
+    "project_name": "short name or title of the project",
+    "purpose": "1-2 sentences: what the project does and what problem it solves",
+    "model_architecture": "1-2 sentences: model type, input features, output classes",
+    "data_pipeline": "1-2 sentences: how data is generated or processed",
+    "api_overview": "1-2 sentences: what endpoints FastAPI exposes and their purpose",
+    "key_components": ["list of 4-6 main scripts/modules and their roles"]
+    }}"""
+
+    system = (
+        "You are a senior ML engineer reading an unfamiliar codebase for the first time. "
+        "You extract the essential technical overview from source files. "
+        "You respond ONLY with valid JSON."
+    )
+
+    raw    = await ollama_generate(prompt, system)
+    result = safe_parse_json(
+        raw,
+        fallback={
+            "project_name":       "Unknown project",
+            "purpose":            "Could not determine project purpose.",
+            "model_architecture": "Unknown",
+            "data_pipeline":      "Unknown",
+            "api_overview":       "Unknown",
+            "key_components":     [],
+        },
+    )
+
+    description = (
+        f"PROJECT: {result.get('project_name', 'N/A')}\n"
+        f"Purpose: {result.get('purpose', 'N/A')}\n"
+        f"Model: {result.get('model_architecture', 'N/A')}\n"
+        f"Data pipeline: {result.get('data_pipeline', 'N/A')}\n"
+        f"API: {result.get('api_overview', 'N/A')}\n"
+        f"Key components: {', '.join(result.get('key_components', []))}"
+    )
+
+    logger.info(
+        f"[LangGraph] node_scan_project_description: done | "
+        f"project='{result.get('project_name')}' | "
+        f"files_read={len(file_excerpts)}"
+    )
+
+    return {"project_description": description}
+
+
+# Node 1: Učitavanje i poređenje metrika
 async def node_load_and_compare_metrics(state: MetricsState) -> dict:
     """
     Učitava prethodni run iz test_metrics_prev.json (ako postoji) i
@@ -240,7 +370,7 @@ async def node_load_and_compare_metrics(state: MetricsState) -> dict:
         "classification_report": state["classification_report"],
         "summary":               {},   # langraph_test prosleđuje summary ako postoji
     }
-    delta, regression = _compute_delta(current_as_dict, previous)
+    delta, regression = compute_delta(current_as_dict, previous)
 
     # Log najvažnijih promena
     if previous and delta.get("mcc_delta") is not None:
@@ -274,14 +404,13 @@ async def node_load_attack_descriptions(state: MetricsState) -> dict:
     """
     logger.info("[LangGraph] node_load_attack_descriptions: start")
 
-    attacks_path = _find_file_recursive("attacks.py", Path("."))
+    attacks_path = find_file_recursive("attacks.py", Path("."))
     if attacks_path is None:
         logger.warning("  attacks.py not found — skipping attack descriptions.")
         return {"attack_descriptions": {}}
 
     try:
         source = attacks_path.read_text(encoding="utf-8")
-        from ollama_client import generate_attack_descriptions
         descriptions = await generate_attack_descriptions(source)
         logger.info(
             f"[LangGraph] node_load_attack_descriptions: done | "
@@ -300,7 +429,7 @@ async def node_analyze_per_class(state: MetricsState) -> dict:
     """
     logger.info("[LangGraph] node_analyze_per_class: start")
 
-    metrics_str = _format_per_class_metrics(
+    metrics_str = format_per_class_metrics(
         state["classification_report"],
         state["roc_auc_scores"],
         state["mcc_score"],
@@ -373,7 +502,7 @@ async def node_analyze_per_class(state: MetricsState) -> dict:
     )
 
     raw = await ollama_generate(prompt, system)
-    result = _safe_parse_json(raw, fallback={"weak_classes": [], "analysis": raw[:500]})
+    result = safe_parse_json(raw, fallback={"weak_classes": [], "analysis": raw[:500]})
 
     logger.info(
         f"[LangGraph] node_analyze_per_class: done | "
@@ -394,7 +523,7 @@ async def node_analyze_confusion(state: MetricsState) -> dict:
     """
     logger.info("[LangGraph] node_analyze_confusion: start")
 
-    matrix_str = _format_confusion_matrix(
+    matrix_str = format_confusion_matrix(
         state["confusion_matrix"],
         state["class_labels"],
     )
@@ -433,7 +562,7 @@ async def node_analyze_confusion(state: MetricsState) -> dict:
     )
 
     raw = await ollama_generate(prompt, system)
-    result = _safe_parse_json(
+    result = safe_parse_json(
         raw,
         fallback={"confusion_patterns": raw[:500], "top_confusions": []},
     )
@@ -513,7 +642,7 @@ async def node_synthesize_recommendations(state: MetricsState) -> dict:
     )
 
     raw = await ollama_generate(prompt, system)
-    result = _safe_parse_json(
+    result = safe_parse_json(
         raw,
         fallback={
             "data_generation": [],
@@ -577,7 +706,7 @@ def node_decision(state: MetricsState) -> dict:
     return {"decision": decision}
 
 
-def _route_after_decision(state: MetricsState) -> str:
+def route_after_decision(state: MetricsState) -> str:
     """
     Routing funkcija za conditional edge posle node_decision.
     Vraca naziv sledeceg cvora kao string.
@@ -585,7 +714,7 @@ def _route_after_decision(state: MetricsState) -> str:
     return state["decision"]
 
 
-def _find_file_recursive(filename: str, root: Path) -> Path | None:
+def find_file_recursive(filename: str, root: Path) -> Path | None:
     """
     Rekurzivno traži fajl po imenu unutar root direktorijuma.
     Preskače foldere definisane u SCAN_SKIP_DIRS.
@@ -604,7 +733,7 @@ async def node_scan_codebase(state: MetricsState) -> dict:
     Rekurzivno skenira relevantne fajlove iz root direktorijuma projekta.
     Koje fajlove čita određuje se na osnovu slabih klasa iz prethodne analize.
 
-    Uvek čita: hyperparam.py, config.py
+    Uvek čita: hyperparameters.py, config.py
     Po slaboj klasi: attacks.py, dataset_generator.py, windowing.py, normal.py
 
     Preskače foldere: __pycache__, venv, .venv, .git, .idea
@@ -627,7 +756,7 @@ async def node_scan_codebase(state: MetricsState) -> dict:
     root = Path(".")
 
     for filename in sorted(files_to_scan):
-        filepath = _find_file_recursive(filename, root)
+        filepath = find_file_recursive(filename, root)
 
         if filepath is None:
             logger.warning(f"  Not found anywhere in project: {filename}")
@@ -655,25 +784,28 @@ async def node_scan_codebase(state: MetricsState) -> dict:
     return {"scanned_files": scanned}
 
 
-# Definicija prostora pretrage — mora odgovarati hyperparam.py
+# Definicija prostora pretrage — mora odgovarati hyperparameters.py
 # Koristi se za validaciju LLM odgovora i formatiranje prompta
-_HYPERPARAMETER_SPACE = {
-    "hidden_size":   {"type": "choice",   "values": [64, 128, 256]},
-    "num_layers":    {"type": "choice",   "values": [1, 2]},
-    "dropout":       {"type": "range",    "min": 0.1, "max": 0.4},
-    "learning_rate": {"type": "range",    "min": 1e-4, "max": 1e-2},
-    "seq_len":       {"type": "choice",   "values": [20, 30, 50]},
+HYPERPARAMETER_SPACE = {
+    "hidden_size":   {"type": "choice", "values": [64, 128, 256]},
+    "num_layers":    {"type": "choice", "values": [1, 2]},
+    "dropout":       {"type": "range",  "min": 0.1,  "max": 0.4},
+    "learning_rate": {"type": "range",  "min": 1e-4, "max": 1e-2},
+    "seq_len":       {"type": "choice", "values": [20, 30, 50]},
+    "batch_size":    {"type": "choice", "values": [32, 64, 128]},
+    "epochs":        {"type": "choice", "values": [10, 20, 30]},
+    "n_splits":      {"type": "choice", "values": [3, 5, 7]},
 }
 
 
-def _validate_hyperparams(proposed: dict) -> dict:
+def validate_hyperparams(proposed: dict) -> dict:
     """
     Proverava da li su predložene vrednosti u okviru dozvoljenog prostora.
     Vrednosti van opsega se zamenjuju najbližom validnom vrednošću.
     Vraća ispravljeni rečnik.
     """
     validated = {}
-    for param, spec in _HYPERPARAMETER_SPACE.items():
+    for param, spec in HYPERPARAMETER_SPACE.items():
         raw = proposed.get(param)
         if raw is None:
             logger.warning(f"  Missing proposed value for '{param}' — skipping.")
@@ -708,10 +840,10 @@ async def node_propose_hyperparams(state: MetricsState) -> dict:
     Poziva Ollamu da predloži konkretne vrednosti hyperparametara na osnovu:
     - rezultata analize metrika (slabe klase, preporuke)
     - sadržaja skeniranih fajlova (ako postoje)
-    - striktno definisanog prostora pretrage (_HYPERPARAMETER_SPACE)
+    - striktno definisanog prostora pretrage (HYPERPARAMETER_SPACE)
 
     LLM je ograničen da bira isključivo iz dozvoljenih vrednosti.
-    Odgovor se validira kroz _validate_hyperparams() pre upisivanja u state.
+    Odgovor se validira kroz validate_hyperparams() pre upisivanja u state.
 
     Popunjava: proposed_hyperparams
     """
@@ -719,7 +851,7 @@ async def node_propose_hyperparams(state: MetricsState) -> dict:
 
     # Formatiranje prostora pretrage za prompt
     space_lines = []
-    for param, spec in _HYPERPARAMETER_SPACE.items():
+    for param, spec in HYPERPARAMETER_SPACE.items():
         if spec["type"] == "choice":
             space_lines.append(f"  - {param}: choose ONE from {spec['values']}")
         else:
@@ -763,9 +895,12 @@ async def node_propose_hyperparams(state: MetricsState) -> dict:
         "dropout": 0.25,
         "learning_rate": 0.001,
         "seq_len": 30,
+        "batch_size": 64,
+        "epochs": 20,
+        "n_splits": 5,
         "reasoning": "Short explanation (2-3 sentences) why these values address the identified weak classes."
         }}"""
-
+    
     system = (
         "You are an ML engineer specializing in LSTM hyperparameter optimization. "
         "You always respect the given hyperparameter space boundaries. "
@@ -773,20 +908,23 @@ async def node_propose_hyperparams(state: MetricsState) -> dict:
     )
 
     raw = await ollama_generate(prompt, system)
-    result = _safe_parse_json(
+    result = safe_parse_json(
         raw,
         fallback={
-            "hidden_size": 128,
-            "num_layers": 2,
-            "dropout": 0.3,
+            "hidden_size":   128,
+            "num_layers":    2,
+            "dropout":       0.3,
             "learning_rate": 0.001,
-            "seq_len": 30,
+            "seq_len":       30,
+            "batch_size":    64,
+            "epochs":        20,
+            "n_splits":      5,
             "reasoning": "Fallback defaults — LLM response could not be parsed.",
         },
     )
 
     reasoning = result.pop("reasoning", "")
-    validated  = _validate_hyperparams(result)
+    validated  = validate_hyperparams(result)
 
     logger.info(
         f"[LangGraph] node_propose_hyperparams: done | "
@@ -794,13 +932,13 @@ async def node_propose_hyperparams(state: MetricsState) -> dict:
     )
 
     # Čuvamo reasoning kao posebno polje radi prikaza korisniku
-    validated["_reasoning"] = reasoning
+    validated["reasoning"] = reasoning
 
     return {"proposed_hyperparams": validated}
 
 
-# Dodata je helper funkcija za input fajla prilikom ponovnog treniranja modela
-def _prompt_user() -> tuple[bool, str]:
+# Helper funkcija za input fajla prilikom ponovnog treniranja modela
+def prompt_user() -> tuple[bool, str]:
     answer = input("  Proceed with retraining? [y/N]: ").strip().lower()
     if answer not in ("y", "yes"):
         return False, ""
@@ -814,7 +952,7 @@ async def node_human_confirm(state: MetricsState) -> dict:
     Popunjava: human_confirmed
     """
     proposed = state.get("proposed_hyperparams", {})
-    reasoning = proposed.get("_reasoning", "")
+    reasoning = proposed.get("reasoning", "")
 
     print("\n" + "=" * 65)
     print("  RETRAIN CONFIRMATION REQUIRED")
@@ -824,13 +962,13 @@ async def node_human_confirm(state: MetricsState) -> dict:
         print(f"\n  Reasoning: {reasoning}")
     print("\n  Proposed hyperparameters:")
     for param, value in proposed.items():
-        if param == "_reasoning":
+        if param == "reasoning":
             continue
         print(f"    {param:<20} {value}")
     print()
 
     loop = asyncio.get_event_loop()
-    confirmed, dataset_path = await loop.run_in_executor(None, _prompt_user)
+    confirmed, dataset_path = await loop.run_in_executor(None, prompt_user)
     return {"human_confirmed": confirmed, "dataset_path": dataset_path}
 
     # Staro 
@@ -843,65 +981,135 @@ async def node_human_confirm(state: MetricsState) -> dict:
     # return {"human_confirmed": confirmed}
 
 
-def _route_after_confirm(state: MetricsState) -> str:
-    """Routing posle human_confirm — retrain ili skip."""
-    return "retrain" if state["human_confirmed"] else "skip"
+# def _route_after_confirm(state: MetricsState) -> str:
+#     """Routing posle human_confirm — retrain ili skip."""
+#     return "retrain" if state["human_confirmed"] else "skip"
 
 
-def _patch_hyperparam_file(hp_path: Path, proposed: dict) -> None:
+def patch_hyperparam_file(hp_path: Path, proposed: dict) -> None:
     """
-    Upisuje predložene hyperparametre u hyperparam.py regex zamenom.
+    Upisuje predložene hyperparametre u hyperparameters.py.
+    Traži linije oblika 'CONST = value' i zamenjuje vrednost.
+    Ako je fajl prazan, upisuje sve vrednosti od nule.
     Pravi .bak backup pre izmene.
     """
-    import re
-    content = hp_path.read_text(encoding="utf-8")
+    PARAM_TO_CONST: dict[str, str] = {
+        "hidden_size":   "HIDDEN_SIZE",
+        "num_layers":    "NUM_LAYERS",
+        "dropout":       "DROPOUT",
+        "learning_rate": "LEARNING_RATE",
+        "seq_len":       "SEQUENCE_LEN",
+        "batch_size":    "BATCH_SIZE",
+        "epochs":        "EPOCHS",
+        "n_splits":      "N_SPLITS",
+        "MODEL_NAME":    "MODEL_NAME",
+    }
+
+    to_patch = {
+        PARAM_TO_CONST[k]: v
+        for k, v in proposed.items()
+        if k in PARAM_TO_CONST
+    }
+
     backup = hp_path.with_suffix(".py.bak")
     shutil.copy(hp_path, backup)
-    logger.info(f"  Backed up hyperparam.py -> {backup}")
+    logger.info(f"  Backed up hyperparameters.py -> {backup}")
 
-    for param, value in proposed.items():
-        spec = _HYPERPARAMETER_SPACE.get(param)
-        if spec is None:
-            continue
-        if spec["type"] == "choice":
-            pattern     = rf'("{param}"\s*:\s*)\[[^\]]*\]'
-            replacement = rf'\g<1>[{value}]'
-        else:
-            pattern     = rf'("{param}"\s*:\s*)\([^)]*\)'
-            replacement = rf'\g<1>({value}, {value})'
-
-        new_content, n = re.subn(pattern, replacement, content)
-        if n:
-            logger.info(f"  Patched '{param}' → {value}")
-            content = new_content
-        else:
-            logger.warning(f"  Could not patch '{param}' — pattern not matched.")
-            
-        # Poseban slučaj za string vrednosti kao što je MODEL_NAME
+    def fmt(value) -> str:
         if isinstance(value, str):
-            pattern     = rf'({re.escape(param)}\s*=\s*)["\'][^"\']*["\']'
-            replacement = rf'\g<1>"{value}"'
-            new_content, n = re.subn(pattern, replacement, content)
-            if n:
-                logger.info(f"  Patched '{param}' → {value}")
-                content = new_content
-            else:
-                logger.warning(f"  Could not patch '{param}' — pattern not matched.")
-            continue
+            return f'"{value}"'
+        if isinstance(value, float):
+            return str(value) if value >= 1e-4 else f"{value:.2e}"
+        return str(value)
 
-    hp_path.write_text(content, encoding="utf-8")
+    # Ako je fajl prazan upisujemo sve vrednosti od nule
+    if not hp_path.read_text(encoding="utf-8").strip():
+        logger.info("  hyperparameters.py is empty — writing all values from scratch.")
+        lines = [f"{const} = {fmt(value)}\n" for const, value in to_patch.items()]
+        hp_path.write_text("".join(lines), encoding="utf-8")
+        return
+
+    new_lines = []
+    for line in hp_path.read_text(encoding="utf-8").splitlines(keepends=True):
+        stripped = line.lstrip()
+        indent   = line[: len(line) - len(stripped)]
+        matched  = False
+
+        for const, value in to_patch.items():
+            if not stripped.startswith(const):
+                continue
+            after = stripped[len(const):]
+            if not after or after[0] not in (' ', '\t', '='):
+                continue
+
+            comment = ""
+            if "#" in after:
+                comment = "  " + after[after.index("#"):]
+
+            new_lines.append(f"{indent}{const} = {fmt(value)}{comment}\n")
+            logger.info(f"  Patched '{const}' → {fmt(value)}")
+            matched = True
+            break
+
+        if not matched:
+            new_lines.append(line)
+
+    hp_path.write_text("".join(new_lines), encoding="utf-8")
+
+# Staro kompleksnije nema potrebe za regexom
+# def patch_hyperparam_file(hp_path: Path, proposed: dict) -> None:
+#     """
+#     Upisuje predložene hyperparametre u hyperparameters.py regex zamenom.
+#     Pravi .bak backup pre izmene.
+#     """
+#     content = hp_path.read_text(encoding="utf-8")
+#     backup = hp_path.with_suffix(".py.bak")
+#     shutil.copy(hp_path, backup)
+#     logger.info(f"  Backed up hyperparameters.py -> {backup}")
+
+#     for param, value in proposed.items():
+#         spec = HYPERPARAMETER_SPACE.get(param)
+#         if spec is None:
+#             continue
+#         if spec["type"] == "choice":
+#             pattern     = rf'("{param}"\s*:\s*)\[[^\]]*\]'
+#             replacement = rf'\g<1>[{value}]'
+#         else:
+#             pattern     = rf'("{param}"\s*:\s*)\([^)]*\)'
+#             replacement = rf'\g<1>({value}, {value})'
+
+#         new_content, n = re.subn(pattern, replacement, content)
+#         if n:
+#             logger.info(f"  Patched '{param}' → {value}")
+#             content = new_content
+#         else:
+#             logger.warning(f"  Could not patch '{param}' — pattern not matched.")
+            
+#         # Poseban slučaj za string vrednosti kao što je MODEL_NAME
+#         if isinstance(value, str):
+#             pattern     = rf'({re.escape(param)}\s*=\s*)["\'][^"\']*["\']'
+#             replacement = rf'\g<1>"{value}"'
+#             new_content, n = re.subn(pattern, replacement, content)
+#             if n:
+#                 logger.info(f"  Patched '{param}' → {value}")
+#                 content = new_content
+#             else:
+#                 logger.warning(f"  Could not patch '{param}' — pattern not matched.")
+#             continue
+
+#     hp_path.write_text(content, encoding="utf-8")
 
 
 async def node_trigger_retrain(state: MetricsState) -> dict:
     """
-    Pronalazi torch_nn.py, patchuje hyperparam.py (uključujući novi MODEL_NAME)
+    Pronalazi torch_nn.py, patchuje hyperparameters.py (uključujući novi MODEL_NAME)
     i pokreće retraining. Čeka završetak i streamuje output liniju po liniju.
     Popunjava: retrain_triggered, retrain_command
     """
     import datetime
 
     proposed = {k: v for k, v in state["proposed_hyperparams"].items()
-                if k != "_reasoning"}
+                if k != "reasoning"}
 
     # Generisanje jedinstvenog imena modela sa timestampom
     timestamp  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -909,13 +1117,13 @@ async def node_trigger_retrain(state: MetricsState) -> dict:
     proposed["MODEL_NAME"] = model_name
     logger.info(f"  New model will be saved as: {model_name}")
 
-    hp_path = _find_file_recursive("hyperparam.py", Path("."))
+    hp_path = find_file_recursive("hyperparameters.py", Path("."))
     if hp_path:
-        _patch_hyperparam_file(hp_path, proposed)
+        patch_hyperparam_file(hp_path, proposed)
     else:
-        logger.warning("  hyperparam.py not found — using existing values.")
+        logger.warning("  hyperparameters.py not found — using existing values.")
 
-    torch_path = _find_file_recursive("torch_nn.py", Path("."))
+    torch_path = find_file_recursive("torch_nn.py", Path("."))
     if torch_path is None:
         logger.error("  torch_nn.py not found — cannot trigger retrain.")
         return {"retrain_triggered": False, "retrain_command": "NOT FOUND"}
@@ -979,7 +1187,9 @@ def build_analyzer_graph():
     """
     graph = StateGraph(MetricsState)
 
-    # --- Postojeći čvorovi ---
+    # Dodato je da se skenira u pocetnom nodu
+    graph.add_node("scan_project",            node_scan_project_description)
+
     graph.add_node("load_and_compare",       node_load_and_compare_metrics)
     graph.add_node("load_attack_descriptions", node_load_attack_descriptions)
     graph.add_node("analyze_per_class",      node_analyze_per_class)
@@ -989,22 +1199,24 @@ def build_analyzer_graph():
     graph.add_node("scan_codebase",          node_scan_codebase)
     graph.add_node("propose_hyperparams",    node_propose_hyperparams)
 
-    # --- Čvorovi Koraka 4 — više nisu deo grafa, pozivaju se iz langraph_test.py ---
+    # Čvorovi Koraka 4 — više nisu deo grafa, pozivaju se iz langraph_test.py 
     # graph.add_node("human_confirm",   node_human_confirm)
     # graph.add_node("trigger_retrain", node_trigger_retrain)
 
-    # --- Sekvencijalne grane ---
-    graph.set_entry_point("load_and_compare")
+    # Sekvencijalne grane
+    graph.set_entry_point("scan_project")
+    # graph.set_entry_point("load_and_compare")
+    graph.add_edge("scan_project",         "load_and_compare")
     graph.add_edge("load_and_compare",         "load_attack_descriptions")
     graph.add_edge("load_attack_descriptions", "analyze_per_class")
     graph.add_edge("analyze_per_class",        "analyze_confusion")
     graph.add_edge("analyze_confusion",        "synthesize")
     graph.add_edge("synthesize",               "decision")
 
-    # --- Conditional edges posle decision ---
+    # Conditional edges posle decision
     graph.add_conditional_edges(
         "decision",
-        _route_after_decision,
+        route_after_decision,
         {
             "SUGGEST_ONLY": END,
             "SCAN_FIRST":   "scan_codebase",
@@ -1015,7 +1227,7 @@ def build_analyzer_graph():
     graph.add_edge("scan_codebase",    "propose_hyperparams")
     graph.add_edge("propose_hyperparams", END)
 
-    # --- Stare grane Koraka 4 — zakomentarisane ---
+    # Stare grane Koraka 4
     # graph.add_edge("propose_hyperparams", "human_confirm")
     # graph.add_conditional_edges(
     #     "human_confirm",
@@ -1025,71 +1237,6 @@ def build_analyzer_graph():
     # graph.add_edge("trigger_retrain", END)
 
     return graph.compile()
-
-# Stara implementacija
-# def build_analyzer_graph():
-#     """
-#     Kreira i kompajlira LangGraph graf za analizu metrika.
-
-#     Tok:
-#         load_and_compare => load_attack_descriptions => analyze_per_class
-#             => analyze_confusion => synthesize => decision
-#                 ├── SUGGEST_ONLY => END
-#                 ├── SCAN_FIRST   => scan_codebase => propose_hyperparams => END
-#                 └── RETRAIN      => propose_hyperparams => END
-
-#     Napomena: human_confirm i trigger_retrain su izvučeni iz grafa —
-#     pozivaju se ručno iz langraph_test.py nakon što se prikažu rezultati.
-#     """
-#     graph = StateGraph(MetricsState)
-
-#     # --- Postojeći čvorovi ---
-#     graph.add_node("load_and_compare",       node_load_and_compare_metrics)
-#     graph.add_node("load_attack_descriptions", node_load_attack_descriptions)
-#     graph.add_node("analyze_per_class",      node_analyze_per_class)
-#     graph.add_node("analyze_confusion",      node_analyze_confusion)
-#     graph.add_node("synthesize",             node_synthesize_recommendations)
-#     graph.add_node("decision",               node_decision)
-#     graph.add_node("scan_codebase",          node_scan_codebase)
-#     graph.add_node("propose_hyperparams",    node_propose_hyperparams)
-
-#     # --- Čvorovi Koraka 4 — više nisu deo grafa, pozivaju se iz langraph_test.py ---
-#     # graph.add_node("human_confirm",   node_human_confirm)
-#     # graph.add_node("trigger_retrain", node_trigger_retrain)
-
-#     # --- Sekvencijalne grane ---
-#     graph.set_entry_point("load_and_compare")
-#     graph.add_edge("load_and_compare",         "load_attack_descriptions")
-#     graph.add_edge("load_attack_descriptions", "analyze_per_class")
-#     graph.add_edge("analyze_per_class",        "analyze_confusion")
-#     graph.add_edge("analyze_confusion",        "synthesize")
-#     graph.add_edge("synthesize",               "decision")
-
-#     # --- Conditional edges posle decision ---
-#     graph.add_conditional_edges(
-#         "decision",
-#         _route_after_decision,
-#         {
-#             "SUGGEST_ONLY": END,
-#             "SCAN_FIRST":   "scan_codebase",
-#             "RETRAIN":      "propose_hyperparams",
-#         },
-#     )
-
-#     graph.add_edge("scan_codebase",    "propose_hyperparams")
-#     graph.add_edge("propose_hyperparams", END)
-
-#     # --- Stare grane Koraka 4 — zakomentarisane ---
-#     # graph.add_edge("propose_hyperparams", "human_confirm")
-#     # graph.add_conditional_edges(
-#     #     "human_confirm",
-#     #     _route_after_confirm,
-#     #     {"retrain": "trigger_retrain", "skip": END},
-#     # )
-#     # graph.add_edge("trigger_retrain", END)
-
-#     return graph.compile()
-
 
 # Globalna instanca deli se kroz celu aplikaciju
 analyzer_graph = build_analyzer_graph()

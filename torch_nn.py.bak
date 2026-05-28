@@ -22,40 +22,15 @@ from functions import *
 from metrics_exporter import export_metrics_to_json
 
 
-try:
-    from hyperparameters import (
-        SEQUENCE_LEN,
-        BATCH_SIZE,
-        HIDDEN_SIZE,
-        NUM_LAYERS,
-        DROPOUT,
-        LEARNING_RATE,
-        EPOCHS,
-        N_SPLITS,
-        MODEL_NAME,
-    )
-    print("[Config] Hyperparameters loaded from hyperparameters.py")
-except (ImportError, AttributeError) as e:
-    print(f"[Config] Could not load hyperparameters.py ({e}) — using defaults.")
-    SEQUENCE_LEN  = 50
-    BATCH_SIZE    = 64
-    HIDDEN_SIZE   = 128
-    NUM_LAYERS    = 2
-    DROPOUT       = 0.3
-    LEARNING_RATE = 1e-3
-    EPOCHS        = 20
-    N_SPLITS      = 5   # Broj foldova za TimeSeriesSplit
-    MODEL_NAME    = 'ddos_lstm_attention.pt'
-
-# SEQUENCE_LEN  = 50
-# BATCH_SIZE    = 64
-# HIDDEN_SIZE   = 128
-# NUM_LAYERS    = 2
-# DROPOUT       = 0.3
-# LEARNING_RATE = 1e-3
-# EPOCHS        = 20
-# N_SPLITS      = 5   # Broj foldova za TimeSeriesSplit
-# MODEL_NAME = 'ddos_lstm_attention.pt'
+SEQUENCE_LEN  = 50
+BATCH_SIZE    = 64
+HIDDEN_SIZE   = 128
+NUM_LAYERS    = 2
+DROPOUT       = 0.3
+LEARNING_RATE = 1e-3
+EPOCHS        = 20
+N_SPLITS      = 5   # Broj foldova za TimeSeriesSplit
+MODEL_NAME = 'ddos_lstm_attention.pt'
 
 
 
